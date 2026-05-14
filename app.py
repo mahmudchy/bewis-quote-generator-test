@@ -45,23 +45,25 @@ def load_all_models():
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. IMAGE FETCHING ---
+# --- 2. IMPROVED IMAGE FETCHING ---
 def get_bwsensing_image(model_name):
-    """Scrapes the official website for the product image."""
+    """Scrapes bwsensing.com search and extracts product thumbnail."""
     search_url = f"https://www.bwsensing.com/search.html?q={model_name}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        response = requests.get(search_url, timeout=5, headers=headers)
+        response = requests.get(search_url, timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
-        # Looks for the first image in the search results
-        img_tag = soup.find('img', {'class': 'lazy'}) or soup.find('img', src=True)
+        # Check specifically for the product list images
+        img_tag = soup.select_one('.product-list img') or soup.find('img', {'class': 'lazy'})
         if img_tag:
-            src = img_tag['src']
-            return src if src.startswith('http') else f"https://www.bwsensing.com{src}"
+            # Try to get data-original (lazy load) or standard src
+            src = img_tag.get('data-original') or img_tag.get('src')
+            if src:
+                return src if src.startswith('http') else f"https://www.bwsensing.com{src}"
     except: return None
     return None
 
-# --- 3. WRITING LOGIC ---
+# --- 3. WRITING & MERGING LOGIC ---
 def safe_write(ws, row, col, value):
     cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
@@ -79,7 +81,7 @@ model_db = load_all_models()
 if 'quote_models' not in st.session_state:
     st.session_state.quote_models = [{"model": ""}]
 
-st.sidebar.title("Customer Information")
+st.sidebar.title("Customer Details")
 c_name = st.sidebar.text_input("Name")
 c_contact = st.sidebar.text_input("Customer Contact")
 c_addr = st.sidebar.text_area("Address")
@@ -90,29 +92,22 @@ short_code = st.sidebar.text_input("Country Code", "SA").upper()
 today = datetime.date.today()
 quote_id = f"{today.strftime('%Y%m%d')}-MC-{short_code}"
 
-st.title(f"Quote: {quote_id}")
-
 final_blocks = []
 for i, _ in enumerate(st.session_state.quote_models):
     with st.expander(f"Product Block {i+1}", expanded=True):
-        col1, col2 = st.columns([2, 2])
+        col1, col2 = st.columns([3, 1])
         options = [""] + sorted(model_db['Model'].unique().tolist()) if not model_db.empty else [""]
         selected = col1.selectbox(f"Select Model", options, key=f"m_{i}")
         
         if selected:
             match = model_db[model_db['Model'] == selected].iloc[0]
-            st.write(f"Category: {match['Category']}")
-            
-            # 3-Tier Pricing Inputs
             p_cols = st.columns(3)
-            p1 = p_cols[0].number_input("Price for 1 pc", key=f"p1_{i}")
-            p10 = p_cols[1].number_input("Price for 10 pcs", key=f"p10_{i}")
-            p100 = p_cols[2].number_input("Price for 100 pcs", key=f"p100_{i}")
+            p1 = p_cols[0].number_input("Price (1 pc)", key=f"p1_{i}", format="%.2f")
+            p10 = p_cols[1].number_input("Price (10 pcs)", key=f"p10_{i}", format="%.2f")
+            p100 = p_cols[2].number_input("Price (100 pcs)", key=f"p100_{i}", format="%.2f")
             
             final_blocks.append({
-                "model": selected,
-                "category": match['Category'],
-                "specs": match['Specs'],
+                "model": selected, "category": match['Category'], "specs": match['Specs'],
                 "tiers": [(1, p1), (10, p10), (100, p100)]
             })
 
@@ -121,16 +116,15 @@ if st.button("➕ Add Another Model"):
     st.rerun()
 
 # --- 5. EXPORT ---
-if st.button("🚀 Generate Excel with Images"):
+if st.button("🚀 Generate Quote (3-Tier View)"):
     template = 'template.xlsx'
     if os.path.exists(template) and final_blocks:
         wb = load_workbook(template)
         ws = wb.active
         
-        # Header Info
+        # Fill Header Info
         safe_write(ws, 4, 9, today.strftime("%B, %dth. %Y"))
         safe_write(ws, 6, 9, quote_id)
-        # New Contact Columns
         safe_write(ws, 10, 2, c_name)
         safe_write(ws, 11, 2, c_contact)
         safe_write(ws, 12, 2, c_addr)
@@ -139,31 +133,42 @@ if st.button("🚀 Generate Excel with Images"):
         
         current_row = 17
         for block in final_blocks:
-            # Fetch Image once per block
-            img_url = get_bwsensing_image(block['model'])
+            # 1. Handle Merges (Description, Model, Picture, Remark)
+            # Merge 3 rows for Column A (Description/Category)
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row+2, end_column=1)
+            safe_write(ws, current_row, 1, block['category'])
             
-            # Write the 3 rows for this block
+            # Merge 3 rows for Column D (Bewis No / Model)
+            ws.merge_cells(start_row=current_row, start_column=4, end_row=current_row+2, end_column=4)
+            safe_write(ws, current_row, 4, block['model'])
+            
+            # Merge 3 rows for Column I (Remark / Specs)
+            ws.merge_cells(start_row=current_row, start_column=9, end_row=current_row+2, end_column=9)
+            safe_write(ws, current_row, 9, block['specs'])
+
+            # Merge 3 rows for Column H (Picture)
+            ws.merge_cells(start_row=current_row, start_column=8, end_row=current_row+2, end_column=8)
+            
+            # 2. Fetch and Add Image
+            img_url = get_bwsensing_image(block['model'])
+            if img_url:
+                try:
+                    img_data = requests.get(img_url, timeout=5).content
+                    img_obj = XLImage(BytesIO(img_data))
+                    # Scale image to fit the 3-row merged cell
+                    img_obj.width, img_obj.height = (90, 90)
+                    ws.add_image(img_obj, f'H{current_row}')
+                except: pass
+
+            # 3. Write Price Rows (Columns E, F, G are NOT merged)
             for j, (qty, price) in enumerate(block['tiers']):
                 row_num = current_row + j
-                if j == 0: # First row of block gets Model/Desc/Image/Specs
-                    safe_write(ws, row_num, 1, block['category'])
-                    safe_write(ws, row_num, 4, block['model'])
-                    safe_write(ws, row_num, 9, block['specs'])
-                    
-                    if img_url:
-                        try:
-                            img_res = requests.get(img_url)
-                            img = XLImage(BytesIO(img_res.content))
-                            img.width, img.height = (80, 80)
-                            ws.add_image(img, f'H{row_num}')
-                        except: pass
-                
-                safe_write(ws, row_num, 5, qty)
-                safe_write(ws, row_num, 6, price)
-                safe_write(ws, row_num, 7, qty * price)
+                safe_write(ws, row_num, 5, qty)    # Qty
+                safe_write(ws, row_num, 6, price)  # Unit Price
+                safe_write(ws, row_num, 7, qty * price) # Total
             
-            current_row += 3 # Move to next block position
+            current_row += 3 # Shift to next block
             
         out = BytesIO()
         wb.save(out)
-        st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
+        st.download_button("📥 Download Official Quote", out.getvalue(), f"{quote_id}.xlsx")
