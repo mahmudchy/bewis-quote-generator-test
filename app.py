@@ -43,7 +43,7 @@ def load_all_models():
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. IMAGE SCRAPER (Using bw-sensing.com) ---
+# --- 2. IMAGE SCRAPER ---
 def get_bw_sensing_image(model_name):
     base = "https://www.bw-sensing.com"
     search_url = f"{base}/search.html?q={model_name}"
@@ -65,24 +65,25 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. UI SETUP ---
-# Aggressive CSS to hide all number input icons/spinners/clear buttons
+# --- 3. EXCEL MERGE HANDLING ---
+def safe_write(ws, row, col, value):
+    """Writes to a cell even if it is part of a merged range."""
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        for merged_range in ws.merged_cells.ranges:
+            if cell.coordinate in merged_range:
+                ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = value
+                return
+    cell.value = value
+
+# --- 4. UI SETUP ---
 st.markdown("""
     <style>
-    /* Remove Spinners */
-    input[type=number]::-webkit-inner-spin-button, 
-    input[type=number]::-webkit-outer-spin-button { 
-        -webkit-appearance: none; 
-        margin: 0; 
+    input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
+        -webkit-appearance: none; margin: 0; 
     }
     input[type=number] { -moz-appearance: textfield; }
-    
-    /* Remove "X" clear button in some browsers */
-    input::-webkit-clear-button,
-    input::-webkit-search-cancel-button {
-        display: none;
-        -webkit-appearance: none;
-    }
+    input::-webkit-clear-button, input::-webkit-search-cancel-button { display: none; -webkit-appearance: none; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -118,15 +119,12 @@ for i, _ in enumerate(st.session_state.rows):
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            
-            # Using text_input for RMB to avoid browser icons, but converting to float
             r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}", value="")
             r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}", value="")
             r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}", value="")
             
-            # Helper to safely convert text to number
             def to_num(val):
-                try: return float(val) if val.strip() else 0.0
+                try: return float(val.replace(',', '')) if val.strip() else 0.0
                 except: return 0.0
 
             r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
@@ -145,7 +143,7 @@ if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
-# --- 4. PREVIEW ---
+# --- 5. PREVIEW ---
 if final_data:
     st.markdown("---")
     st.subheader("👁️ Live Quote Preview")
@@ -161,32 +159,37 @@ if final_data:
     if preview_rows:
         st.table(pd.DataFrame(preview_rows))
 
-# --- 5. EXPORT ---
+# --- 6. EXPORT ---
 c1, c2 = st.columns(2)
 
 if c1.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx'):
         wb = load_workbook('template.xlsx')
         ws = wb.active
-        ws.cell(4, 9).value = today.strftime("%B %d, %Y")
-        ws.cell(5, 9).value = expiry.strftime("%B %d, %Y")
-        ws.cell(6, 9).value = quote_id
-        for idx, val in enumerate([c_name, c_contact, c_addr, c_phone, c_email], 10):
-            ws.cell(idx, 2).value = val
+        
+        # Metadata
+        safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
+        safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
+        safe_write(ws, 6, 9, quote_id)
+        
+        # Customer Info
+        cust_vals = [c_name, c_contact, c_addr, c_phone, c_email]
+        for idx, val in enumerate(cust_vals, 10):
+            safe_write(ws, idx, 2, val)
             
         cur_row = 17
         for block in final_data:
-            for col in [1, 4, 8, 9]:
-                ws.merge_cells(start_row=cur_row, start_column=col, end_row=cur_row+2, end_column=col)
+            # Main product info
+            safe_write(ws, cur_row, 1, "") # Description
+            safe_write(ws, cur_row, 4, block['model'])
+            safe_write(ws, cur_row, 9, block['specs'])
             
-            ws.cell(cur_row, 1).value = "" 
-            ws.cell(cur_row, 4).value = block['model']
-            ws.cell(cur_row, 9).value = block['specs']
-            
+            # Tiered Pricing
             for j, t in enumerate(block['tiers']):
-                ws.cell(cur_row+j, 5).value = t['qty']
-                ws.cell(cur_row+j, 6).value = t['usd']
+                safe_write(ws, cur_row + j, 5, t['qty'])
+                safe_write(ws, cur_row + j, 6, round(t['usd'], 2))
             
+            # Fetch and Insert Image
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
@@ -194,34 +197,18 @@ if c1.button("🚀 Export to Excel"):
                     img = XLImage(BytesIO(res.content))
                     img.width, img.height = (90, 90)
                     ws.add_image(img, f'H{cur_row}')
-                except: pass
+                except:
+                    pass
             cur_row += 3
             
         out = BytesIO()
         wb.save(out)
-        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx")
+        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx", key="dl_xl")
 
 if c2.button("📄 Export to PDF"):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, f"Quotation: {quote_id}", ln=True, align='C')
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 10, f"Customer: {c_name} | Date: {today}", ln=True)
-    pdf.ln(5)
-    
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(50, 10, "Model", 1, 0, 'C', True)
-    pdf.cell(20, 10, "Qty", 1, 0, 'C', True)
-    pdf.cell(40, 10, "Unit Price", 1, 0, 'C', True)
-    pdf.cell(40, 10, "Total", 1, 1, 'C', True)
-    
-    for p in preview_rows:
-        pdf.cell(50, 10, p['Model'], 1)
-        pdf.cell(20, 10, str(p['Qty']), 1)
-        pdf.cell(40, 10, p['Unit Price (USD)'], 1)
-        pdf.cell(40, 10, p['Subtotal'], 1)
-        pdf.ln()
-        
-    pdf_data = pdf.output(dest='S').encode('latin-1')
-    st.download_button("📥 Download PDF", pdf_data, f"{quote_id}.pdf")
+    pdf_out = pdf.output(dest='S').encode('latin-1')
+    st.download_button("📥 Download PDF", pdf_out, f"{quote_id}.pdf", key="dl_pdf")
