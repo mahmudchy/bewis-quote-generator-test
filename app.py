@@ -43,7 +43,7 @@ def load_all_models():
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. IMAGE SCRAPER (bw-sensing.com) ---
+# --- 2. IMAGE SCRAPER (Using bw-sensing.com) ---
 def get_bw_sensing_image(model_name):
     base = "https://www.bw-sensing.com"
     search_url = f"{base}/search.html?q={model_name}"
@@ -65,17 +65,23 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. APP SETUP ---
-# Custom CSS to remove the up/down arrows (spinners) from number inputs
+# --- 3. UI SETUP ---
+# Aggressive CSS to hide all number input icons/spinners/clear buttons
 st.markdown("""
     <style>
+    /* Remove Spinners */
     input[type=number]::-webkit-inner-spin-button, 
     input[type=number]::-webkit-outer-spin-button { 
         -webkit-appearance: none; 
         margin: 0; 
     }
-    input[type=number] {
-        -moz-appearance: textfield;
+    input[type=number] { -moz-appearance: textfield; }
+    
+    /* Remove "X" clear button in some browsers */
+    input::-webkit-clear-button,
+    input::-webkit-search-cancel-button {
+        display: none;
+        -webkit-appearance: none;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -113,19 +119,25 @@ for i, _ in enumerate(st.session_state.rows):
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
             
-            # label_visibility="collapsed" or clean labels for speed
-            # value=None + step=None removes the buttons in most browsers
-            r1 = p_cols[0].number_input("RMB (1pc)", key=f"r1_{i}", value=None, label_visibility="visible")
-            r10 = p_cols[1].number_input("RMB (10pcs)", key=f"r10_{i}", value=None, label_visibility="visible")
-            r100 = p_cols[2].number_input("RMB (100pcs)", key=f"r100_{i}", value=None, label_visibility="visible")
+            # Using text_input for RMB to avoid browser icons, but converting to float
+            r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}", value="")
+            r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}", value="")
+            r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}", value="")
             
-            if r1 is not None or r10 is not None or r100 is not None:
+            # Helper to safely convert text to number
+            def to_num(val):
+                try: return float(val) if val.strip() else 0.0
+                except: return 0.0
+
+            r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
+            
+            if r1 > 0 or r10 > 0 or r100 > 0:
                 final_data.append({
                     "model": sel, "specs": m['Specs'],
                     "tiers": [
-                        {"qty": 1, "usd": (r1 or 0)/exch_rate},
-                        {"qty": 10, "usd": (r10 or 0)/exch_rate},
-                        {"qty": 100, "usd": (r100 or 0)/exch_rate}
+                        {"qty": 1, "usd": r1/exch_rate},
+                        {"qty": 10, "usd": r10/exch_rate},
+                        {"qty": 100, "usd": r100/exch_rate}
                     ]
                 })
 
@@ -167,14 +179,13 @@ if c1.button("🚀 Export to Excel"):
             for col in [1, 4, 8, 9]:
                 ws.merge_cells(start_row=cur_row, start_column=col, end_row=cur_row+2, end_column=col)
             
-            ws.cell(cur_row, 1).value = "" # Keep description empty
+            ws.cell(cur_row, 1).value = "" 
             ws.cell(cur_row, 4).value = block['model']
             ws.cell(cur_row, 9).value = block['specs']
             
             for j, t in enumerate(block['tiers']):
                 ws.cell(cur_row+j, 5).value = t['qty']
                 ws.cell(cur_row+j, 6).value = t['usd']
-                # Column 7 (Line Total) handled by template formulas
             
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
