@@ -178,4 +178,39 @@ if c1.button("🚀 Export to Excel"):
             
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
-                try
+                try:
+                    res = requests.get(img_url, timeout=5)
+                    img = XLImage(BytesIO(res.content))
+                    img.width, img.height = (90, 90)
+                    ws.add_image(img, f'H{cur_row}')
+                except: pass
+            cur_row += 3
+            
+        out = BytesIO()
+        wb.save(out)
+        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx")
+
+if c2.button("📄 Export to PDF"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(0, 10, f"Quotation: {quote_id}", ln=True, align='C')
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 10, f"Customer: {c_name} | Date: {today}", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(50, 10, "Model", 1, 0, 'C', True)
+    pdf.cell(20, 10, "Qty", 1, 0, 'C', True)
+    pdf.cell(40, 10, "Unit Price", 1, 0, 'C', True)
+    pdf.cell(40, 10, "Total", 1, 1, 'C', True)
+    
+    for p in preview_rows:
+        pdf.cell(50, 10, p['Model'], 1)
+        pdf.cell(20, 10, str(p['Qty']), 1)
+        pdf.cell(40, 10, p['Unit Price (USD)'], 1)
+        pdf.cell(40, 10, p['Subtotal'], 1)
+        pdf.ln()
+        
+    pdf_data = pdf.output(dest='S').encode('latin-1')
+    st.download_button("📥 Download PDF", pdf_data, f"{quote_id}.pdf")
