@@ -14,19 +14,23 @@ from fpdf import FPDF
 @st.cache_data
 def load_all_models():
     all_data = []
+    # Identify local data files
     files = [f for f in os.listdir('.') if f.endswith(('.csv', '.xlsx'))]
     for file in files:
         try:
             if any(x in file.lower() for x in ["template", "requirements"]): continue
             df_raw = pd.read_csv(file, header=None).fillna('') if file.endswith('.csv') else pd.read_excel(file, header=None).fillna('')
+            
             model_col_idx = -1
             header_row = 0
+            # Find the header row by looking for 'model' or 'bewis no'
             for r_idx in range(min(len(df_raw), 25)):
                 row_vals = [str(v).strip().lower() for v in df_raw.iloc[r_idx]]
                 if 'model' in row_vals or 'bewis no' in row_vals:
                     model_col_idx = row_vals.index('model') if 'model' in row_vals else row_vals.index('bewis no')
                     header_row = r_idx
                     break
+            
             if model_col_idx != -1:
                 df = pd.read_csv(file, header=header_row).fillna('') if file.endswith('.csv') else pd.read_excel(file, header=header_row).fillna('')
                 df.columns = [str(c).strip() for c in df.columns]
@@ -67,16 +71,18 @@ def get_bw_sensing_image(model_name):
 
 # --- 3. EXCEL MERGE HANDLING ---
 def safe_write(ws, row, col, value):
-    """Writes to a cell even if it is part of a merged range."""
+    """Writes to a cell, specifically targeting the top-left of a merged range if applicable."""
     cell = ws.cell(row=row, column=col)
-    if isinstance(cell, MergedCell):
-        for merged_range in ws.merged_cells.ranges:
-            if cell.coordinate in merged_range:
-                ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = value
-                return
+    for merged_range in ws.merged_cells.ranges:
+        if cell.coordinate in merged_range:
+            ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = value
+            return
     cell.value = value
 
 # --- 4. UI SETUP ---
+st.set_page_config(layout="wide", page_title="BWS Quote Gen")
+
+# Custom CSS for clean numeric entry
 st.markdown("""
     <style>
     input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
@@ -87,7 +93,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 model_db = load_all_models()
 
 if 'rows' not in st.session_state:
@@ -129,13 +134,14 @@ for i, _ in enumerate(st.session_state.rows):
 
             r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
             
+            # Add data only if at least one price is entered
             if r1 > 0 or r10 > 0 or r100 > 0:
                 final_data.append({
                     "model": sel, "specs": m['Specs'],
                     "tiers": [
-                        {"qty": 1, "usd": r1/exch_rate},
-                        {"qty": 10, "usd": r10/exch_rate},
-                        {"qty": 100, "usd": r100/exch_rate}
+                        {"qty": 1, "rmb": r1},
+                        {"qty": 10, "rmb": r10},
+                        {"qty": 100, "rmb": r100}
                     ]
                 })
 
@@ -150,11 +156,12 @@ if final_data:
     preview_rows = []
     for f in final_data:
         for t in f['tiers']:
-            if t['usd'] > 0:
+            if t['rmb'] > 0:
+                usd_price = t['rmb'] / exch_rate
                 preview_rows.append({
                     "Model": f['model'], "Qty": t['qty'],
-                    "Unit Price (USD)": f"{t['usd']:.2f}",
-                    "Subtotal": f"{(t['qty']*t['usd']):.2f}"
+                    "Unit Price (USD)": f"{usd_price:.2f}",
+                    "Subtotal": f"{(t['qty'] * usd_price):.2f}"
                 })
     if preview_rows:
         st.table(pd.DataFrame(preview_rows))
@@ -167,43 +174,50 @@ if c1.button("🚀 Export to Excel"):
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Metadata
+        # Header Metadata
         safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
         safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
         safe_write(ws, 6, 9, quote_id)
         
-        # Customer Info
-        cust_vals = [c_name, c_contact, c_addr, c_phone, c_email]
-        for idx, val in enumerate(cust_vals, 10):
-            safe_write(ws, idx, 2, val)
+        # Customer Details
+        safe_write(ws, 10, 2, c_name)
+        safe_write(ws, 11, 2, c_contact)
+        safe_write(ws, 12, 2, c_addr)
+        safe_write(ws, 13, 2, c_phone)
+        safe_write(ws, 14, 2, c_email)
             
-        cur_row = 17
-        for block in final_data:
-            # Main product info
-            safe_write(ws, cur_row, 1, "") # Description
-            safe_write(ws, cur_row, 4, block['model'])
-            safe_write(ws, cur_row, 9, block['specs'])
+        start_row = 17
+        for block_idx, block in enumerate(final_data):
+            # Calculate the top row of the current 3-row block
+            current_top = start_row + (block_idx * 3)
             
-            # Tiered Pricing
-            for j, t in enumerate(block['tiers']):
-                safe_write(ws, cur_row + j, 5, t['qty'])
-                safe_write(ws, cur_row + j, 6, round(t['usd'], 2))
+            # 1. Model Name (Column D / 4)
+            safe_write(ws, current_top, 4, block['model'])
             
-            # Fetch and Insert Image
+            # 2. Specs/Remark (Column I / 9)
+            safe_write(ws, current_top, 9, block['specs'])
+            
+            # 3. Tiered Quantities and Prices
+            # Col 5 = Qty, Col 6 = Unit Price USD
+            for tier_idx, tier in enumerate(block['tiers']):
+                row_idx = current_top + tier_idx
+                safe_write(ws, row_idx, 5, tier['qty'])
+                if tier['rmb'] > 0:
+                    safe_write(ws, row_idx, 6, round(tier['rmb'] / exch_rate, 2))
+            
+            # 4. Fetch and Insert Image (Column H / 8)
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
                     res = requests.get(img_url, timeout=5)
                     img = XLImage(BytesIO(res.content))
                     img.width, img.height = (90, 90)
-                    ws.add_image(img, f'H{cur_row}')
-                except:
-                    pass
-            cur_row += 3
+                    ws.add_image(img, f'H{current_top}')
+                except: pass
             
         out = BytesIO()
         wb.save(out)
-        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx", key="dl_xl")
+        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx", key="dl_xl_final")
 
 if c2.button("📄 Export to PDF"):
     pdf = FPDF()
@@ -211,4 +225,4 @@ if c2.button("📄 Export to PDF"):
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, f"Quotation: {quote_id}", ln=True, align='C')
     pdf_out = pdf.output(dest='S').encode('latin-1')
-    st.download_button("📥 Download PDF", pdf_out, f"{quote_id}.pdf", key="dl_pdf")
+    st.download_button("📥 Download PDF", pdf_out, f"{quote_id}.pdf", key="dl_pdf_final")
