@@ -174,4 +174,29 @@ if col_ex1.button("🚀 Generate Excel"):
             
         out_b = BytesIO()
         wb.save(out_b)
-        st.download_button("📥 Download
+        st.download_button("📥 Download Excel", out_b.getvalue(), f"{quote_id}.xlsx")
+
+if col_ex2.button("📄 Generate PDF"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, f"Quotation: {quote_id}", ln=True, align='C')
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 10, f"Date: {today.strftime('%Y-%m-%d')} | Valid until: {expiry.strftime('%Y-%m-%d')}", ln=True)
+    pdf.ln(5)
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(40, 10, "Model")
+    pdf.cell(20, 10, "Qty")
+    pdf.cell(40, 10, "Unit Price (USD)")
+    pdf.cell(40, 10, "Total (USD)")
+    pdf.ln()
+    pdf.set_font("Arial", size=10)
+    for p in preview_list:
+        pdf.cell(40, 10, str(p['Model']))
+        pdf.cell(20, 10, str(p['Qty']))
+        pdf.cell(40, 10, str(p['Unit Price (USD)']))
+        pdf.cell(40, 10, str(p['Total (USD)']))
+        pdf.ln()
+    
+    pdf_out = pdf.output(dest='S').encode('latin-1')
+    st.download_button("📥 Download PDF", pdf_out, f"{quote_id}.pdf")
