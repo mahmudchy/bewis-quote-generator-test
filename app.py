@@ -43,7 +43,7 @@ def load_all_models():
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. IMAGE SCRAPER (Using bw-sensing.com) ---
+# --- 2. IMAGE SCRAPER (bw-sensing.com) ---
 def get_bw_sensing_image(model_name):
     base = "https://www.bw-sensing.com"
     search_url = f"{base}/search.html?q={model_name}"
@@ -66,6 +66,20 @@ def get_bw_sensing_image(model_name):
     return None
 
 # --- 3. APP SETUP ---
+# Custom CSS to remove the up/down arrows (spinners) from number inputs
+st.markdown("""
+    <style>
+    input[type=number]::-webkit-inner-spin-button, 
+    input[type=number]::-webkit-outer-spin-button { 
+        -webkit-appearance: none; 
+        margin: 0; 
+    }
+    input[type=number] {
+        -moz-appearance: textfield;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 model_db = load_all_models()
 
@@ -99,12 +113,12 @@ for i, _ in enumerate(st.session_state.rows):
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
             
-            # value=None removes the default 0. User can just type and Tab.
-            r1 = p_cols[0].number_input("RMB (1pc)", key=f"r1_{i}", step=1, format="%d", value=None)
-            r10 = p_cols[1].number_input("RMB (10pcs)", key=f"r10_{i}", step=1, format="%d", value=None)
-            r100 = p_cols[2].number_input("RMB (100pcs)", key=f"r100_{i}", step=1, format="%d", value=None)
+            # label_visibility="collapsed" or clean labels for speed
+            # value=None + step=None removes the buttons in most browsers
+            r1 = p_cols[0].number_input("RMB (1pc)", key=f"r1_{i}", value=None, label_visibility="visible")
+            r10 = p_cols[1].number_input("RMB (10pcs)", key=f"r10_{i}", value=None, label_visibility="visible")
+            r100 = p_cols[2].number_input("RMB (100pcs)", key=f"r100_{i}", value=None, label_visibility="visible")
             
-            # Only process if user has entered at least one price
             if r1 is not None or r10 is not None or r100 is not None:
                 final_data.append({
                     "model": sel, "specs": m['Specs'],
@@ -121,7 +135,8 @@ if st.button("➕ Add Another Product Line"):
 
 # --- 4. PREVIEW ---
 if final_data:
-    st.markdown("### 👁️ Preview (Calculated USD)")
+    st.markdown("---")
+    st.subheader("👁️ Live Quote Preview")
     preview_rows = []
     for f in final_data:
         for t in f['tiers']:
@@ -131,7 +146,8 @@ if final_data:
                     "Unit Price (USD)": f"{t['usd']:.2f}",
                     "Subtotal": f"{(t['qty']*t['usd']):.2f}"
                 })
-    st.table(pd.DataFrame(preview_rows))
+    if preview_rows:
+        st.table(pd.DataFrame(preview_rows))
 
 # --- 5. EXPORT ---
 c1, c2 = st.columns(2)
@@ -151,49 +167,15 @@ if c1.button("🚀 Export to Excel"):
             for col in [1, 4, 8, 9]:
                 ws.merge_cells(start_row=cur_row, start_column=col, end_row=cur_row+2, end_column=col)
             
+            ws.cell(cur_row, 1).value = "" # Keep description empty
             ws.cell(cur_row, 4).value = block['model']
             ws.cell(cur_row, 9).value = block['specs']
             
             for j, t in enumerate(block['tiers']):
                 ws.cell(cur_row+j, 5).value = t['qty']
                 ws.cell(cur_row+j, 6).value = t['usd']
+                # Column 7 (Line Total) handled by template formulas
             
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
-                try:
-                    res = requests.get(img_url, timeout=5)
-                    img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (90, 90)
-                    ws.add_image(img, f'H{cur_row}')
-                except: pass
-            cur_row += 3
-            
-        out = BytesIO()
-        wb.save(out)
-        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx")
-
-if c2.button("📄 Export to PDF"):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, f"Quotation: {quote_id}", ln=True, align='C')
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 10, f"Customer: {c_name} | Date: {today}", ln=True)
-    pdf.ln(5)
-    
-    # Simple PDF Table
-    pdf.set_fill_color(200, 220, 255)
-    pdf.cell(50, 10, "Model", 1, 0, 'C', True)
-    pdf.cell(20, 10, "Qty", 1, 0, 'C', True)
-    pdf.cell(40, 10, "Unit Price", 1, 0, 'C', True)
-    pdf.cell(40, 10, "Total", 1, 1, 'C', True)
-    
-    for p in preview_rows:
-        pdf.cell(50, 10, p['Model'], 1)
-        pdf.cell(20, 10, str(p['Qty']), 1)
-        pdf.cell(40, 10, p['Unit Price (USD)'], 1)
-        pdf.cell(40, 10, p['Subtotal'], 1)
-        pdf.ln()
-        
-    pdf_data = pdf.output(dest='S').encode('latin-1')
-    st.download_button("📥 Download PDF", pdf_data, f"{quote_id}.pdf")
+                try
