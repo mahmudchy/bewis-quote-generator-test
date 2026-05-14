@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.cell.cell import MergedCell
 
-# --- 1. DATA LOADING & CLEANING ---
+# --- 1. DATA LOADING ---
 @st.cache_data
 def load_all_models():
     all_data = []
@@ -18,12 +18,6 @@ def load_all_models():
         try:
             if any(x in file.lower() for x in ["template", "requirements"]): continue
             df_raw = pd.read_csv(file, header=None).fillna('') if file.endswith('.csv') else pd.read_excel(file, header=None).fillna('')
-            
-            # Clean category: Logic to avoid "ALL" or "BWSENSING NEW"
-            raw_cat = file.replace('.csv', '').replace('.xlsx', '').upper()
-            # Split by common delimiters and remove noise
-            parts = [p for p in raw_cat.split('-') if p not in ['ALL', 'NEW', 'BWSENSING', 'LIST', 'MODEL']]
-            category = " ".join(parts).strip() if parts else "INCLINOMETER"
             
             model_col_idx = -1
             header_row = 0
@@ -40,43 +34,44 @@ def load_all_models():
                 m_col = df.columns[model_col_idx]
                 for _, row in df.iterrows():
                     m_name = str(row[m_col]).strip()
-                    if not m_name or m_name.lower() in ['model', 'nan', 'all']: continue
+                    if not m_name or m_name.lower() in ['model', 'nan']: continue
                     specs = []
                     for col in df.columns:
                         if any(k in col.lower() for k in ['accuracy', 'range', 'axis', 'output']):
                             val = str(row[col]).strip()
                             if val and val.lower() != 'nan': specs.append(f"{col}: {val}")
-                    all_data.append({"Model": m_name, "Category": category, "Specs": "\n".join(specs)})
+                    all_data.append({"Model": m_name, "Specs": "\n".join(specs)})
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. THE IMAGE SCRAPER (Fixed for Lazy Loading) ---
-def get_bws_product_image(model_name):
-    base_url = "https://www.bwsensing.com"
-    search_url = f"{base_url}/search.html?q={model_name}"
+# --- 2. THE IMAGE SCRAPER (Strict Path Version) ---
+def get_bws_direct_image(model_name):
+    base = "https://www.bwsensing.com"
+    search_url = f"{base}/search.html?q={model_name}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        # 1. Search
+        # Step 1: Find product link
         res = requests.get(search_url, timeout=10, headers=headers)
         soup = BeautifulSoup(res.text, 'html.parser')
-        link_tag = soup.select_one('.product-list a')
-        if not link_tag: return None
+        link = soup.select_one('.product-list a')
+        if not link: return None
         
-        # 2. Detail Page
-        detail_url = base_url + link_tag['href'] if link_tag['href'].startswith('/') else link_tag['href']
+        # Step 2: Extract image from detail page
+        detail_url = base + link['href'] if link['href'].startswith('/') else link['href']
         detail_res = requests.get(detail_url, timeout=10, headers=headers)
         dsoup = BeautifulSoup(detail_res.text, 'html.parser')
         
-        # 3. Find Image (checking data-original for lazy load)
-        img_tag = dsoup.select_one('.product-info .left-img img')
+        # Look for the specific 'left-img' class from your screenshot
+        img_tag = dsoup.select_one('.left-img img') or dsoup.select_one('.product-info img')
         if img_tag:
+            # Bypass lazy loading by checking data-original first
             src = img_tag.get('data-original') or img_tag.get('src')
             if src:
-                return src if src.startswith('http') else base_url + src
+                return src if src.startswith('http') else base + src
     except: return None
     return None
 
-# --- 3. WRITING LOGIC ---
+# --- 3. EXCEL HELPERS ---
 def safe_write(ws, row, col, value):
     cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
@@ -87,101 +82,102 @@ def safe_write(ws, row, col, value):
     else:
         cell.value = value
 
-# --- 4. UI ---
+# --- 4. STREAMLIT UI ---
 st.set_page_config(layout="wide")
 model_db = load_all_models()
 
-if 'quote_models' not in st.session_state:
-    st.session_state.quote_models = [{"model": ""}]
+if 'quote_list' not in st.session_state:
+    st.session_state.quote_list = [{"model": ""}]
 
 with st.sidebar:
-    st.title("Settings")
-    exch_rate = st.number_input("RMB to USD Exchange Rate", value=7.2, step=0.01)
+    st.title("Quotation Config")
+    rate = st.number_input("RMB to USD Rate", value=7.2)
     st.divider()
-    c_name = st.text_input("Name")
+    c_name = st.text_input("Customer Name")
     c_contact = st.text_input("Customer Contact")
     c_addr = st.text_area("Address")
     c_phone = st.text_input("Phone Number")
     c_email = st.text_input("Email")
-    short_code = st.text_input("Country Short Code", "SA").upper()
+    country_code = st.text_input("Country Code", "SA").upper()
 
 today = datetime.date.today()
-valid_until = today + datetime.timedelta(days=30)
-quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{short_code}"
+expiry = today + datetime.timedelta(days=30)
+quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country_code}"
 
-st.title(f"Quote: {quote_id}")
+st.title(f"Generate Quote: {quote_id}")
 
-final_blocks = []
-for i, _ in enumerate(st.session_state.quote_models):
+final_selections = []
+for i, _ in enumerate(st.session_state.quote_list):
     with st.expander(f"Product Block {i+1}", expanded=True):
         opts = [""] + sorted(model_db['Model'].unique().tolist())
-        selected = st.selectbox(f"Select Model", opts, key=f"m_{i}")
-        if selected:
-            m = model_db[model_db['Model'] == selected].iloc[0]
-            p_cols = st.columns(3)
-            # Input is in RMB
-            rmb1 = p_cols[0].number_input("Price 1pc (RMB)", key=f"r1_{i}")
-            rmb10 = p_cols[1].number_input("Price 10pcs (RMB)", key=f"r10_{i}")
-            rmb100 = p_cols[2].number_input("Price 100pcs (RMB)", key=f"r100_{i}")
+        sel_model = st.selectbox(f"Search Model", opts, key=f"m_sel_{i}")
+        if sel_model:
+            match = model_db[model_db['Model'] == sel_model].iloc[0]
+            col_p = st.columns(3)
+            r1 = col_p[0].number_input("RMB Price (1pc)", key=f"r1_{i}")
+            r10 = col_p[1].number_input("RMB Price (10pcs)", key=f"r10_{i}")
+            r100 = col_p[2].number_input("RMB Price (100pcs)", key=f"r100_{i}")
             
-            final_blocks.append({
-                "model": selected, "cat": m['Category'], "specs": m['Specs'],
-                "tiers": [
-                    (1, round(rmb1 / exch_rate, 2)),
-                    (10, round(rmb10 / exch_rate, 2)),
-                    (100, round(rmb100 / exch_rate, 2))
-                ]
+            final_selections.append({
+                "model": sel_model,
+                "specs": match['Specs'],
+                "tiers": [round(r1/rate, 2), round(r10/rate, 2), round(r100/rate, 2)]
             })
 
-if st.button("➕ Add Another Model"):
-    st.session_state.quote_models.append({"model": ""})
+if st.button("➕ Add More Products"):
+    st.session_state.quote_list.append({"model": ""})
     st.rerun()
 
-# --- 5. EXPORT ---
-if st.button("🚀 Generate Final Excel"):
-    template = 'template.xlsx'
-    if os.path.exists(template) and final_blocks:
-        wb = load_workbook(template)
+# --- 5. GENERATE EXCEL ---
+if st.button("🚀 Export to Excel"):
+    if os.path.exists('template.xlsx') and final_selections:
+        wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Header Info
-        safe_write(ws, 4, 9, today.strftime("%B, %dth. %Y"))
-        safe_write(ws, 5, 9, valid_until.strftime("%B, %dth. %Y"))
+        # Header/Date Info
+        safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
+        safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
         safe_write(ws, 6, 9, quote_id)
         
-        # Contact Rows
-        for idx, val in enumerate([c_name, c_contact, c_addr, c_phone, c_email], 10):
-            safe_write(ws, idx, 2, val)
-        
-        current_row = 17
-        for block in final_blocks:
-            # 1. Merge and Write Fixed Data
-            for col in [1, 4, 8, 9]:
-                ws.merge_cells(start_row=current_row, start_column=col, end_row=current_row+2, end_column=col)
+        # Customer Info
+        for idx, info in enumerate([c_name, c_contact, c_addr, c_phone, c_email], 10):
+            safe_write(ws, idx, 2, info)
             
-            safe_write(ws, current_row, 1, block['cat'])
-            safe_write(ws, current_row, 4, block['model'])
-            safe_write(ws, current_row, 9, block['specs'])
+        row_cursor = 17
+        for block in final_selections:
+            # 1. Merge and Clear Columns
+            # Column 1 (Description) -> Keeping it EMPTY as requested
+            ws.merge_cells(start_row=row_cursor, start_column=1, end_row=row_cursor+2, end_column=1)
+            safe_write(ws, row_cursor, 1, "") 
             
-            # 2. Pricing (Numeric Only, No $)
-            for j, (qty, usd_price) in enumerate(block['tiers']):
-                r_num = current_row + j
-                safe_write(ws, r_num, 5, qty)
-                safe_write(ws, r_num, 6, usd_price)
-                safe_write(ws, r_num, 7, round(qty * usd_price, 2))
+            # Column 4 (Bewis No)
+            ws.merge_cells(start_row=row_cursor, start_column=4, end_row=row_cursor+2, end_column=4)
+            safe_write(ws, row_cursor, 4, block['model'])
             
-            # 3. Image Fetch
-            img_url = get_bws_product_image(block['model'])
+            # Column 9 (Remark)
+            ws.merge_cells(start_row=row_cursor, start_column=9, end_row=row_cursor+2, end_column=9)
+            safe_write(ws, row_cursor, 9, block['specs'])
+
+            # 2. Pricing Tiers (Rows 1-3)
+            qty_list = [1, 10, 100]
+            for j in range(3):
+                curr = row_cursor + j
+                safe_write(ws, curr, 5, qty_list[j])
+                safe_write(ws, curr, 6, block['tiers'][j])
+                # REMOVED safe_write for Column 7 (Line Total) to let template formula work
+            
+            # 3. Image Handling
+            img_url = get_bws_direct_image(block['model'])
             if img_url:
                 try:
                     img_data = requests.get(img_url, timeout=10).content
-                    img_obj = XLImage(BytesIO(img_data))
-                    img_obj.width, img_obj.height = (90, 90)
-                    ws.add_image(img_obj, f'H{current_row}')
+                    xl_img = XLImage(BytesIO(img_data))
+                    xl_img.width, xl_img.height = (90, 90)
+                    ws.add_image(xl_img, f'H{row_cursor}')
                 except: pass
-                
-            current_row += 3
             
-        out = BytesIO()
-        wb.save(out)
-        st.download_button("📥 Download Official Quote", out.getvalue(), f"{quote_id}.xlsx")
+            row_cursor += 3
+            
+        output = BytesIO()
+        wb.save(output)
+        st.download_button("📥 Click to Download Quote", output.getvalue(), f"{quote_id}.xlsx")
