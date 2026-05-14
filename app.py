@@ -7,90 +7,72 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.cell.cell import MergedCell
 
-# --- 1. DATA LOADING ENGINE (Updated for Multi-Sheet Excel) ---
+# --- 1. DATA LOADING ---
 @st.cache_data
 def load_all_models():
     all_data = []
-    # The exact name of your uploaded master file
-    master_file = 'Model list  all-BWSENSING new.xlsx'
+    # Check for CSV files with 'Model list' in the name
+    csv_files = [f for f in os.listdir('.') if 'Model list' in f and f.endswith('.csv')]
     
-    if not os.path.exists(master_file):
-        return pd.DataFrame()
-
-    try:
-        # Load all sheets at once into a dictionary
-        sheets_dict = pd.read_excel(master_file, sheet_name=None)
-        
-        for sheet_name, df in sheets_dict.items():
-            # Clean up column names (remove spaces/newlines)
+    for file in csv_files:
+        try:
+            category = file.replace('Model list', '').replace('.csv', '').replace('-', '').strip()
+            df = pd.read_csv(file, header=1).fillna('')
             df.columns = [str(c).strip() for c in df.columns]
             
-            # Find the "Model" column
+            # Flexible column detection
             model_col = next((c for c in df.columns if "Model" in c), None)
             
             if model_col:
                 for _, row in df.iterrows():
                     m_name = str(row[model_col]).strip()
-                    # Skip empty rows or header-looking rows
-                    if not m_name or m_name.lower() in ["model", "nan"]: 
-                        continue
+                    if not m_name or m_name.lower() == "model": continue
                     
                     specs = []
-                    
-                    # 1. Axis Logic (Requirement: Single/Dual Axis in Remark)
+                    # Find Axis and technical data
                     axis_col = next((c for c in df.columns if "axis" in c.lower()), None)
-                    if axis_col and str(row[axis_col]).strip() and str(row[axis_col]).lower() != "nan":
-                        specs.append(f"Axis: {row[axis_col]}")
+                    if axis_col and row[axis_col]: specs.append(f"Axis: {row[axis_col]}")
                     
-                    # 2. Key Parameter Logic
-                    important_keys = ['accuracy', 'resolution', 'range', 'output', 'power supply']
+                    important = ['accuracy', 'resolution', 'range', 'output']
                     for col in df.columns:
-                        if any(k in col.lower() for k in important_keys) and str(row[col]).strip() and str(row[col]).lower() != "nan":
-                            # Avoid duplicating Axis if already added
-                            if "axis" not in col.lower():
-                                specs.append(f"{col}: {row[col]}")
+                        if any(k in col.lower() for k in important) and row[col]:
+                            specs.append(f"{col}: {row[col]}")
                     
                     all_data.append({
                         "Model": m_name,
-                        "Category": sheet_name, # Sheet name acts as the category
+                        "Category": category,
                         "Specs": "\n".join(specs)
                     })
-    except Exception as e:
-        st.error(f"Error reading Excel: {e}")
-        
+        except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. IMAGE SCRAPER ---
-def fetch_product_image(model_name):
-    url = f"https://www.bwsensing.com/search.html?q={model_name}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        img = soup.find('img', {'class': 'lazy'}) or soup.find('img', src=True)
-        if img:
-            src = img['src']
-            return src if src.startswith('http') else "https://www.bwsensing.com" + src
-    except: return None
+# --- 2. MERGED CELL SAFETY WRITER ---
+def safe_write(ws, row, col, value):
+    """Writes to a cell even if it is part of a merged range."""
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        # Find the master cell of the merged range
+        for merged_range in ws.merged_cells.ranges:
+            if cell.coordinate in merged_range:
+                ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = value
+                return
+    else:
+        cell.value = value
 
-# --- 3. UI ---
-st.set_page_config(layout="wide", page_title="BWSensing Quote Gen")
+# --- 3. UI SETUP ---
+st.set_page_config(layout="wide")
 model_db = load_all_models()
 
-st.sidebar.title("1. Quote Details")
+st.sidebar.title("Quotation Details")
 c_name = st.sidebar.text_input("Customer Name")
 c_addr = st.sidebar.text_area("Address")
-country_code = st.sidebar.text_input("Country Short Code (e.g. SA, AU, US)", value="SA").upper()
-rmb_rate = st.sidebar.number_input("RMB to USD Rate", value=7.2)
+country_code = st.sidebar.text_input("Country Short Code", value="SA").upper()
+rmb_rate = st.sidebar.number_input("RMB to USD", value=7.2)
 
 today = datetime.date.today()
 quote_no = f"{today.strftime('%Y%m%d')}-MC-{country_code}"
-
-st.title(f"Quotation: {quote_no}")
-
-if model_db.empty:
-    st.error(f"⚠️ Master file 'Model list  all-BWSENSING new.xlsx' not found or contains no 'Model' columns.")
 
 if 'rows' not in st.session_state:
     st.session_state.rows = [{"model": ""}]
@@ -98,52 +80,47 @@ if 'rows' not in st.session_state:
 selected_items = []
 for i, row in enumerate(st.session_state.rows):
     cols = st.columns([3, 1, 1])
-    m_options = [""] + sorted(list(model_db['Model'].unique())) if not model_db.empty else [""]
-    
-    choice = cols[0].selectbox(f"Select Product {i+1}", m_options, key=f"sel_{i}")
+    m_list = [""] + sorted(list(model_db['Model'].unique())) if not model_db.empty else [""]
+    choice = cols[0].selectbox(f"Select Product {i+1}", m_list, key=f"sel_{i}")
     qty = cols[1].number_input("Qty", min_value=1, key=f"qty_{i}")
     rmb = cols[2].number_input("RMB Price", key=f"rmb_{i}")
     
     if choice and not model_db.empty:
-        item_data = model_db[model_db['Model'] == choice].iloc[0]
+        db_row = model_db[model_db['Model'] == choice].iloc[0]
         selected_items.append({
-            "model": choice, "desc": item_data['Category'], "qty": qty,
-            "remark": item_data['Specs'], "usd": round(rmb/rmb_rate, 2)
+            "model": choice, "desc": db_row['Category'], "qty": qty,
+            "remark": db_row['Specs'], "usd": round(rmb/rmb_rate, 2)
         })
 
-if st.button("➕ Add Another Item"):
+if st.button("➕ Add Item"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
 # --- 4. EXPORT ---
-if st.button("🚀 Generate Official Excel"):
-    template_path = 'template.xlsx'
-    if not os.path.exists(template_path):
-        st.error("Missing 'template.xlsx' on GitHub!")
+if st.button("🚀 Generate Quote"):
+    t_path = 'template.xlsx' if os.path.exists('template.xlsx') else 'template.xls'
+    if not os.path.exists(t_path):
+        st.error("Missing template.xlsx on GitHub!")
     else:
-        wb = load_workbook(template_path)
+        wb = load_workbook(t_path)
         ws = wb.active
-        ws['I4'], ws['I6'] = today.strftime("%B, %dth. %Y"), quote_no
-        ws['B10'], ws['B12'] = c_name, c_addr
+        
+        # Header Info
+        safe_write(ws, 4, 9, today.strftime("%B, %dth. %Y")) # Cell I4
+        safe_write(ws, 6, 9, quote_no)                      # Cell I6
+        safe_write(ws, 10, 2, c_name)                        # Cell B10
+        safe_write(ws, 12, 2, c_addr)                        # Cell B12
 
+        # Table Items
         for idx, item in enumerate(selected_items):
-            row_num = 17 + idx
-            ws.cell(row=row_num, column=1, value=item['desc'])
-            ws.cell(row=row_num, column=4, value=item['model'])
-            ws.cell(row=row_num, column=5, value=item['qty'])
-            ws.cell(row=row_num, column=6, value=item['usd'])
-            ws.cell(row=row_num, column=7, value=item['usd'] * item['qty'])
-            ws.cell(row=row_num, column=9, value=item['remark'])
-            
-            img_url = fetch_product_image(item['model'])
-            if img_url:
-                try:
-                    img_data = requests.get(img_url, timeout=5).content
-                    img_obj = XLImage(BytesIO(img_data))
-                    img_obj.width, img_obj.height = (70, 70)
-                    ws.add_image(img_obj, f'H{row_num}')
-                except: pass
+            r = 17 + idx
+            safe_write(ws, r, 1, item['desc'])   # Col A
+            safe_write(ws, r, 4, item['model'])  # Col D
+            safe_write(ws, r, 5, item['qty'])    # Col E
+            safe_write(ws, r, 6, item['usd'])    # Col F
+            safe_write(ws, r, 7, item['usd'] * item['qty']) # Col G
+            safe_write(ws, r, 9, item['remark']) # Col I
 
-        output = BytesIO()
-        wb.save(output)
-        st.download_button("📥 Download Final Quotation", output.getvalue(), f"{quote_no}.xlsx")
+        out = BytesIO()
+        wb.save(out)
+        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_no}.xlsx")
