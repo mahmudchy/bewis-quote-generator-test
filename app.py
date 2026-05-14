@@ -24,33 +24,26 @@ def get_quote_dates():
     return today.strftime("%B, %dth. %Y"), valid_until.strftime("%B, %dth. %Y"), today.strftime("%Y%m%d")
 
 def search_product_data(model_query):
-    """Searches all CSVs for model specs and category."""
     if not model_query:
         return "", ""
-    
-    # List all CSV files in the directory
+    # Look for CSV files in the current directory
     csv_files = [f for f in os.listdir('.') if f.endswith('.csv') and 'Model list' in f]
-    
     for file in csv_files:
         try:
-            # Most of your files have headers on row 1 or 2
             df = pd.read_csv(file, header=1).fillna('')
             df.columns = df.columns.str.strip()
-            
             if 'Model' in df.columns:
-                # Find exact or partial match
                 match = df[df['Model'].astype(str).str.contains(model_query, case=False, na=False)]
                 if not match.empty:
                     row = match.iloc[0]
-                    # Extract Category from filename
+                    # Category is derived from the filename
                     category = file.split('-')[-1].replace('.csv', '').strip()
-                    # Create a technical summary for Remarks
                     specs = []
                     for col in df.columns:
                         if col not in ['Model', 'Remark'] and row[col]:
                             specs.append(f"{col}: {row[col]}")
                     return category, "\n".join(specs)
-        except Exception:
+        except:
             continue
     return "Product", ""
 
@@ -71,7 +64,6 @@ def fetch_bwsensing_image(model_name):
 st.set_page_config(page_title="BWSensing Quote Tool", layout="wide")
 st.title("🛡️ BWSensing Automated Quotation System")
 
-# Sidebar
 with st.sidebar:
     st.header("1. Customer Details")
     c_name = st.text_input("Customer Name")
@@ -79,34 +71,31 @@ with st.sidebar:
     c_country = st.selectbox("Country (ID Code)", list(COUNTRY_MAP.keys()))
     rmb_rate = st.number_input("RMB to USD Rate", value=7.2)
 
-# Date Logic
 date_disp, valid_disp, date_id = get_quote_dates()
 quote_no = f"{date_id}-MC-{COUNTRY_MAP[c_country]}"
 st.info(f"**Quote:** {quote_no} | **Valid Until:** {valid_disp}")
 
-# Product Table logic
-if 'items' not in st.session_state:
-    st.session_state.items = [{"model": "", "desc": "", "qty": 1, "rmb": 0.0, "remark": ""}]
+# Initialize state with a different name to avoid method conflict
+if 'quote_items' not in st.session_state:
+    st.session_state.quote_items = [{"model": "", "desc": "", "qty": 1, "rmb": 0.0, "remark": ""}]
 
 def add_row():
-    st.session_state.items.append({"model": "", "desc": "", "qty": 1, "rmb": 0.0, "remark": ""})
+    st.session_state.quote_items.append({"model": "", "desc": "", "qty": 1, "rmb": 0.0, "remark": ""})
 
 # Display Rows
-for i, item in enumerate(st.session_state.items):
+for i, item in enumerate(st.session_state.quote_items):
     cols = st.columns([2, 2, 1, 1, 3])
     
-    # Model Input (The Trigger)
+    # Model Input
     new_model = cols[0].text_input(f"Model Number", value=item['model'], key=f"m_{i}")
     
-    # If model changed, auto-fill others
     if new_model != item['model']:
         cat, spec = search_product_data(new_model)
-        st.session_state.items[i]['model'] = new_model
-        st.session_state.items[i]['desc'] = cat
-        st.session_state.items[i]['remark'] = spec
+        st.session_state.quote_items[i]['model'] = new_model
+        st.session_state.quote_items[i]['desc'] = cat
+        st.session_state.quote_items[i]['remark'] = spec
         st.rerun()
 
-    # Editable fields
     item['desc'] = cols[1].text_input(f"Description", value=item['desc'], key=f"d_{i}")
     item['qty'] = cols[2].number_input(f"Qty", value=item['qty'], min_value=1, key=f"q_{i}")
     item['rmb'] = cols[3].number_input(f"RMB Price", value=item['rmb'], key=f"p_{i}")
@@ -120,23 +109,19 @@ if st.button("📦 Generate Final XLSX"):
     ws = wb.active
     ws.title = "Quotation"
     
-    # Header Setup
     ws.merge_cells('A2:K2')
     ws['A2'] = "Wuxi Bewis Sensing Technology LLC"
     ws['A2'].font = Font(bold=True, size=14)
-    
     ws['G4'], ws['I4'] = "Date:", date_disp
     ws['G6'], ws['I6'] = "Quote Number:", quote_no
     ws['A10'], ws['B10'] = "Customer:", c_name
     
-    # Table Headers
     header_labels = ["Description", "", "", "Bewis NO", "Qty(Set)", "Unit Price/USD", "Line Total", "Picture", "Remark"]
     for idx, text in enumerate(header_labels, 1):
         ws.cell(row=16, column=idx, value=text).font = Font(bold=True)
 
-    # Add Data
     row_idx = 17
-    for item in st.session_state.items:
+    for item in st.session_state.quote_items:
         usd_unit = round(item['rmb'] / rmb_rate, 2)
         ws.cell(row=row_idx, column=1, value=item['desc'])
         ws.cell(row=row_idx, column=4, value=item['model'])
@@ -144,24 +129,19 @@ if st.button("📦 Generate Final XLSX"):
         ws.cell(row=row_idx, column=6, value=usd_unit)
         ws.cell(row=row_idx, column=7, value=usd_unit * item['qty'])
         ws.cell(row=row_idx, column=9, value=item['remark'])
-        
-        # RMB Hidden Column
         ws.cell(row=row_idx, column=12, value=item['rmb'])
         
-        # Image Fetching
         img_url = fetch_bwsensing_image(item['model'])
         if img_url:
             try:
-                res = requests.get(img_url)
+                res = requests.get(img_url, timeout=5)
                 img = XLImage(BytesIO(res.content))
                 img.width, img.height = (70, 70)
                 ws.add_image(img, f'H{row_idx}')
             except: pass
-        
         row_idx += 1
 
     ws.column_dimensions['L'].visible = False
-    
     buffer = BytesIO()
     wb.save(buffer)
     st.download_button("📥 Download Official Quote", buffer.getvalue(), f"{quote_no}.xlsx")
