@@ -43,24 +43,21 @@ def load_all_models():
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. NEW SCRAPER (bw-sensing.com) ---
+# --- 2. IMAGE SCRAPER (Using bw-sensing.com) ---
 def get_bw_sensing_image(model_name):
     base = "https://www.bw-sensing.com"
-    # Search URL for the new site structure
     search_url = f"{base}/search.html?q={model_name}"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get(search_url, timeout=10, headers=headers)
+        res = requests.get(search_url, timeout=7, headers=headers)
         soup = BeautifulSoup(res.text, 'html.parser')
-        # Target the first product item link
         link = soup.select_one('.product-list a') or soup.select_one('.pro_list a')
         if not link: return None
         
         detail_url = base + link['href'] if link['href'].startswith('/') else link['href']
-        d_res = requests.get(detail_url, timeout=10, headers=headers)
+        d_res = requests.get(detail_url, timeout=7, headers=headers)
         dsoup = BeautifulSoup(d_res.text, 'html.parser')
         
-        # Target the main product gallery image
         img_tag = dsoup.select_one('.product-info img') or dsoup.select_one('.left-img img')
         if img_tag:
             src = img_tag.get('data-original') or img_tag.get('src')
@@ -68,100 +65,99 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. UI SETUP ---
-st.set_page_config(layout="wide", page_title="BWS Quote Generator")
+# --- 3. APP SETUP ---
+st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 model_db = load_all_models()
 
 if 'rows' not in st.session_state:
     st.session_state.rows = [{"model": ""}]
 
 with st.sidebar:
-    st.title("Settings")
-    exch_rate = st.number_input("RMB to USD Rate", value=6.82, step=0.01) # Default 6.82
+    st.title("Control Panel")
+    exch_rate = st.number_input("RMB to USD Rate", value=6.82, step=0.01)
     st.divider()
-    c_name = st.text_input("Name")
-    c_contact = st.text_input("Contact")
+    c_name = st.text_input("Customer Name")
+    c_contact = st.text_input("Customer Contact")
     c_addr = st.text_area("Address")
-    c_phone = st.text_input("Phone")
+    c_phone = st.text_input("Phone Number")
     c_email = st.text_input("Email")
-    code = st.text_input("Country Code", "SA").upper()
+    country_code = st.text_input("Country Code", "SA").upper()
 
 today = datetime.date.today()
 expiry = today + datetime.timedelta(days=30)
-quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{code}"
+quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country_code}"
 
-st.title(f"Quote Generator: {quote_id}")
+st.title(f"Quote: {quote_id}")
 
 final_data = []
 for i, _ in enumerate(st.session_state.rows):
     with st.expander(f"Product {i+1}", expanded=True):
         opts = [""] + sorted(model_db['Model'].unique().tolist())
-        sel = st.selectbox("Model", opts, key=f"sel_{i}")
+        sel = st.selectbox("Search & Select Model", opts, key=f"sel_{i}")
+        
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            # Rounded RMB inputs
-            r1 = p_cols[0].number_input("RMB (1pc)", key=f"r1_{i}", step=1, format="%d")
-            r10 = p_cols[1].number_input("RMB (10pcs)", key=f"r10_{i}", step=1, format="%d")
-            r100 = p_cols[2].number_input("RMB (100pcs)", key=f"r100_{i}", step=1, format="%d")
             
-            final_data.append({
-                "model": sel, "specs": m['Specs'],
-                "tiers": [
-                    {"qty": 1, "usd": r1/exch_rate},
-                    {"qty": 10, "usd": r10/exch_rate},
-                    {"qty": 100, "usd": r100/exch_rate}
-                ]
-            })
+            # value=None removes the default 0. User can just type and Tab.
+            r1 = p_cols[0].number_input("RMB (1pc)", key=f"r1_{i}", step=1, format="%d", value=None)
+            r10 = p_cols[1].number_input("RMB (10pcs)", key=f"r10_{i}", step=1, format="%d", value=None)
+            r100 = p_cols[2].number_input("RMB (100pcs)", key=f"r100_{i}", step=1, format="%d", value=None)
+            
+            # Only process if user has entered at least one price
+            if r1 is not None or r10 is not None or r100 is not None:
+                final_data.append({
+                    "model": sel, "specs": m['Specs'],
+                    "tiers": [
+                        {"qty": 1, "usd": (r1 or 0)/exch_rate},
+                        {"qty": 10, "usd": (r10 or 0)/exch_rate},
+                        {"qty": 100, "usd": (r100 or 0)/exch_rate}
+                    ]
+                })
 
-if st.button("➕ Add Product"):
+if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
-# --- 4. PREVIEW TABLE ---
+# --- 4. PREVIEW ---
 if final_data:
-    st.subheader("Live Quote Preview")
-    preview_list = []
+    st.markdown("### 👁️ Preview (Calculated USD)")
+    preview_rows = []
     for f in final_data:
         for t in f['tiers']:
-            preview_list.append({
-                "Model": f['model'],
-                "Qty": t['qty'],
-                "Unit Price (USD)": round(t['usd'], 2),
-                "Total (USD)": round(t['qty'] * t['usd'], 2)
-            })
-    st.table(pd.DataFrame(preview_list))
+            if t['usd'] > 0:
+                preview_rows.append({
+                    "Model": f['model'], "Qty": t['qty'],
+                    "Unit Price (USD)": f"{t['usd']:.2f}",
+                    "Subtotal": f"{(t['qty']*t['usd']):.2f}"
+                })
+    st.table(pd.DataFrame(preview_rows))
 
-# --- 5. EXPORT BUTTONS ---
-col_ex1, col_ex2 = st.columns(2)
+# --- 5. EXPORT ---
+c1, c2 = st.columns(2)
 
-if col_ex1.button("🚀 Generate Excel"):
+if c1.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx'):
         wb = load_workbook('template.xlsx')
         ws = wb.active
-        # Header/Dates
         ws.cell(4, 9).value = today.strftime("%B %d, %Y")
         ws.cell(5, 9).value = expiry.strftime("%B %d, %Y")
         ws.cell(6, 9).value = quote_id
-        # Contact
         for idx, val in enumerate([c_name, c_contact, c_addr, c_phone, c_email], 10):
             ws.cell(idx, 2).value = val
             
         cur_row = 17
         for block in final_data:
-            # Merge fixed columns
             for col in [1, 4, 8, 9]:
                 ws.merge_cells(start_row=cur_row, start_column=col, end_row=cur_row+2, end_column=col)
             
             ws.cell(cur_row, 4).value = block['model']
             ws.cell(cur_row, 9).value = block['specs']
             
-            # Pricing (No formula override for Column 7)
             for j, t in enumerate(block['tiers']):
                 ws.cell(cur_row+j, 5).value = t['qty']
                 ws.cell(cur_row+j, 6).value = t['usd']
             
-            # Image
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
@@ -172,31 +168,32 @@ if col_ex1.button("🚀 Generate Excel"):
                 except: pass
             cur_row += 3
             
-        out_b = BytesIO()
-        wb.save(out_b)
-        st.download_button("📥 Download Excel", out_b.getvalue(), f"{quote_id}.xlsx")
+        out = BytesIO()
+        wb.save(out)
+        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx")
 
-if col_ex2.button("📄 Generate PDF"):
+if c2.button("📄 Export to PDF"):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
+    pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, f"Quotation: {quote_id}", ln=True, align='C')
     pdf.set_font("Arial", size=10)
-    pdf.cell(0, 10, f"Date: {today.strftime('%Y-%m-%d')} | Valid until: {expiry.strftime('%Y-%m-%d')}", ln=True)
+    pdf.cell(0, 10, f"Customer: {c_name} | Date: {today}", ln=True)
     pdf.ln(5)
-    pdf.set_font("Arial", 'B', 10)
-    pdf.cell(40, 10, "Model")
-    pdf.cell(20, 10, "Qty")
-    pdf.cell(40, 10, "Unit Price (USD)")
-    pdf.cell(40, 10, "Total (USD)")
-    pdf.ln()
-    pdf.set_font("Arial", size=10)
-    for p in preview_list:
-        pdf.cell(40, 10, str(p['Model']))
-        pdf.cell(20, 10, str(p['Qty']))
-        pdf.cell(40, 10, str(p['Unit Price (USD)']))
-        pdf.cell(40, 10, str(p['Total (USD)']))
-        pdf.ln()
     
-    pdf_out = pdf.output(dest='S').encode('latin-1')
-    st.download_button("📥 Download PDF", pdf_out, f"{quote_id}.pdf")
+    # Simple PDF Table
+    pdf.set_fill_color(200, 220, 255)
+    pdf.cell(50, 10, "Model", 1, 0, 'C', True)
+    pdf.cell(20, 10, "Qty", 1, 0, 'C', True)
+    pdf.cell(40, 10, "Unit Price", 1, 0, 'C', True)
+    pdf.cell(40, 10, "Total", 1, 1, 'C', True)
+    
+    for p in preview_rows:
+        pdf.cell(50, 10, p['Model'], 1)
+        pdf.cell(20, 10, str(p['Qty']), 1)
+        pdf.cell(40, 10, p['Unit Price (USD)'], 1)
+        pdf.cell(40, 10, p['Subtotal'], 1)
+        pdf.ln()
+        
+    pdf_data = pdf.output(dest='S').encode('latin-1')
+    st.download_button("📥 Download PDF", pdf_data, f"{quote_id}.pdf")
