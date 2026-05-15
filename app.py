@@ -135,4 +135,68 @@ for i, _ in enumerate(st.session_state.rows):
             
             if r1 > 0 or r10 > 0 or r100 > 0:
                 final_data.append({
-                    "model":
+                    "model": sel, "specs": m['Specs'],
+                    "tiers": [
+                        {"qty": 1, "rmb": r1},
+                        {"qty": 10, "rmb": r10},
+                        {"qty": 100, "rmb": r100}
+                    ]
+                })
+
+if st.button("➕ Add Another Product Line"):
+    st.session_state.rows.append({"model": ""})
+    st.rerun()
+
+# --- 5. EXPORT ---
+if st.button("🚀 Export to Excel"):
+    if os.path.exists('template.xlsx') and final_data:
+        wb = load_workbook('template.xlsx')
+        ws = wb.active
+        
+        # Metadata
+        ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
+        ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
+        ultra_safe_write(ws, 6, 9, quote_id)
+        
+        # Customer Info
+        ultra_safe_write(ws, 10, 2, c_name)
+        ultra_safe_write(ws, 11, 2, c_contact)
+        ultra_safe_write(ws, 12, 2, c_addr)
+        ultra_safe_write(ws, 13, 2, c_phone)
+        ultra_safe_write(ws, 14, 2, c_email)
+            
+        start_row = 17
+        for idx, block in enumerate(final_data):
+            cur_top = start_row + (idx * 3)
+            
+            # 1. Model & Specs (Columns 4 & 9)
+            ultra_safe_write(ws, cur_top, 4, block['model'])
+            ultra_safe_write(ws, cur_top, 9, block['specs'])
+            ultra_safe_write(ws, cur_top, 1, "ALL") # Description column
+            
+            # Align center for the merged blocks
+            for c_idx in [1, 4, 9]:
+                ws.cell(row=cur_top, column=c_idx).alignment = Alignment(vertical='center', wrapText=True)
+            
+            # 2. Tiers (Qty Col 5, Price Col 6, Total Col 7)
+            for j, t in enumerate(block['tiers']):
+                r_idx = cur_top + j
+                ultra_safe_write(ws, r_idx, 5, t['qty'])
+                if t['rmb'] > 0:
+                    u_usd = round(t['rmb'] / exch_rate, 2)
+                    ultra_safe_write(ws, r_idx, 6, u_usd)
+                    ultra_safe_write(ws, r_idx, 7, round(u_usd * t['qty'], 2))
+            
+            # 3. Image (Col 8)
+            img_url = get_bw_sensing_image(block['model'])
+            if img_url:
+                try:
+                    res = requests.get(img_url, timeout=5)
+                    img = XLImage(BytesIO(res.content))
+                    img.width, img.height = (90, 90)
+                    ws.add_image(img, f'H{cur_top}')
+                except: pass
+            
+        out = BytesIO()
+        wb.save(out)
+        st.download_button("📥 Download Final Excel", out.getvalue(), f"{quote_id}.xlsx")
