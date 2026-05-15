@@ -79,8 +79,9 @@ def ultra_safe_write(ws, row, col, value):
     cell.value = value
 
 def apply_block_styles(ws, start_row):
-    """Applies borders to all 9 columns and 3 rows of a product block."""
+    """Applies borders and sets basic row heights for the block."""
     for r in range(start_row, start_row + 3):
+        ws.row_dimensions[r].height = 25 # Standard row height
         for c in range(1, 10): # Columns A to I
             ws.cell(row=r, column=c).border = thin_border
 
@@ -158,12 +159,12 @@ if st.button("🚀 Export to Excel"):
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Metadata
+        # 1. Metadata
         ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
         ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
         ultra_safe_write(ws, 6, 9, quote_id)
         
-        # Customer Info
+        # 2. Customer Info
         ultra_safe_write(ws, 10, 2, c_name)
         ultra_safe_write(ws, 11, 2, c_contact)
         ultra_safe_write(ws, 12, 2, c_addr)
@@ -171,23 +172,35 @@ if st.button("🚀 Export to Excel"):
         ultra_safe_write(ws, 14, 2, c_email)
             
         start_row = 17
+        
+        # 3. DYNAMIC ROW INSERTION
+        # This pushes the existing template's footer (Thank you, Total, etc.) down.
+        # We insert enough rows for all products: (3 data rows + 1 gap row) * num_products
+        num_products = len(final_data)
+        ws.insert_rows(start_row, num_products * 4)
+
         for idx, block in enumerate(final_data):
-            # Blocks are 3 rows + 1 empty row gap = 4 rows total per product
             cur_top = start_row + (idx * 4) 
             
-            # Apply Borders to the entire 3-row block
+            # 4. MANUAL MERGING (Ensures every product block is identical)
+            ws.merge_cells(start_row=cur_top, start_column=1, end_row=cur_top+2, end_column=1) # Description
+            ws.merge_cells(start_row=cur_top, start_column=4, end_row=cur_top+2, end_column=4) # Bewis No
+            ws.merge_cells(start_row=cur_top, start_column=8, end_row=cur_top+2, end_column=8) # Picture
+            ws.merge_cells(start_row=cur_top, start_column=9, end_row=cur_top+2, end_column=9) # Remark
+            
+            # Apply Borders & Styles
             apply_block_styles(ws, cur_top)
             
-            # Write Merged Values (ensure Description is "ALL")
+            # Write Main Data
             ultra_safe_write(ws, cur_top, 1, "ALL")
             ultra_safe_write(ws, cur_top, 4, block['model'])
             ultra_safe_write(ws, cur_top, 9, block['specs'])
             
-            # Vertical Alignment for Merged Cells
+            # Center alignment for merged areas
             for c_idx in [1, 4, 9]:
                 ws.cell(row=cur_top, column=c_idx).alignment = Alignment(vertical='center', horizontal='center', wrapText=True)
             
-            # Tiers (Qty, Price, Total)
+            # 5. Write Tiers (Qty, Price, Total)
             for j, t in enumerate(block['tiers']):
                 r_idx = cur_top + j
                 ultra_safe_write(ws, r_idx, 5, t['qty'])
@@ -199,7 +212,7 @@ if st.button("🚀 Export to Excel"):
                     ultra_safe_write(ws, r_idx, 6, "")
                     ultra_safe_write(ws, r_idx, 7, "")
 
-            # Image (Col 8)
+            # 6. Insert Product Image
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
