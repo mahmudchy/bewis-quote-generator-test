@@ -7,7 +7,6 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Side
 
 # --- 1. DATA LOADING ---
@@ -63,48 +62,28 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. THE STYLE & MERGE HANDLERS ---
+# --- 3. THE STYLE ENGINE ---
 thin_border = Border(
     left=Side(style='thin'), right=Side(style='thin'), 
     top=Side(style='thin'), bottom=Side(style='thin')
 )
 
-def ultra_safe_write(ws, row, col, value):
-    cell = ws.cell(row=row, column=col)
-    if isinstance(cell, MergedCell):
-        for m_range in ws.merged_cells.ranges:
-            if cell.coordinate in m_range:
-                ws.cell(row=m_range.min_row, column=m_range.min_col).value = value
-                return
-    cell.value = value
-
 def apply_block_styles(ws, start_row):
-    """Applies borders and sets basic row heights for the block."""
+    """Applies borders and sets basic row heights for the 3-row product block."""
     for r in range(start_row, start_row + 3):
-        ws.row_dimensions[r].height = 25 # Standard row height
+        ws.row_dimensions[r].height = 25 
         for c in range(1, 10): # Columns A to I
             ws.cell(row=r, column=c).border = thin_border
 
 # --- 4. UI SETUP ---
-st.set_page_config(layout="wide", page_title="BWS Quote Gen")
-
-st.markdown("""
-    <style>
-    input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
-        -webkit-appearance: none; margin: 0; 
-    }
-    input[type=number] { -moz-appearance: textfield; }
-    input::-webkit-clear-button, input::-webkit-search-cancel-button { display: none; -webkit-appearance: none; }
-    </style>
-""", unsafe_allow_html=True)
-
+st.set_page_config(layout="wide", page_title="BWS Quote Generator")
 model_db = load_all_models()
 
 if 'rows' not in st.session_state:
     st.session_state.rows = [{"model": ""}]
 
 with st.sidebar:
-    st.title("Control Panel")
+    st.title("Settings")
     exch_rate = st.number_input("RMB to USD Rate", value=6.82, step=0.01)
     st.divider()
     c_name = st.text_input("Customer Name")
@@ -125,29 +104,21 @@ for i, _ in enumerate(st.session_state.rows):
     with st.expander(f"Product {i+1}", expanded=True):
         opts = [""] + sorted(model_db['Model'].unique().tolist())
         sel = st.selectbox("Search & Select Model", opts, key=f"sel_{i}")
-        
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}")
-            r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}")
-            r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}")
+            r1 = st.text_input("RMB (1pc)", "0", key=f"r1_{i}")
+            r10 = st.text_input("RMB (10pcs)", "0", key=f"r10_{i}")
+            r100 = st.text_input("RMB (100pcs)", "0", key=f"r100_{i}")
             
-            def to_num(val):
-                try: return float(str(val).replace(',', '')) if val else 0.0
-                except: return 0.0
-
-            r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
-            
-            if r1 > 0 or r10 > 0 or r100 > 0:
-                final_data.append({
-                    "model": sel, "specs": m['Specs'],
-                    "tiers": [
-                        {"qty": 1, "rmb": r1},
-                        {"qty": 10, "rmb": r10},
-                        {"qty": 100, "rmb": r100}
-                    ]
-                })
+            final_data.append({
+                "model": sel, "specs": m['Specs'],
+                "tiers": [
+                    {"qty": 1, "rmb": float(r1.replace(',', '') or 0)},
+                    {"qty": 10, "rmb": float(r10.replace(',', '') or 0)},
+                    {"qty": 100, "rmb": float(r100.replace(',', '') or 0)}
+                ]
+            })
 
 if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
@@ -159,69 +130,65 @@ if st.button("🚀 Export to Excel"):
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # 1. Metadata
-        ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
-        ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
-        ultra_safe_write(ws, 6, 9, quote_id)
-        
-        # 2. Customer Info
-        ultra_safe_write(ws, 10, 2, c_name)
-        ultra_safe_write(ws, 11, 2, c_contact)
-        ultra_safe_write(ws, 12, 2, c_addr)
-        ultra_safe_write(ws, 13, 2, c_phone)
-        ultra_safe_write(ws, 14, 2, c_email)
+        # 1. Update Headers & Customer Info
+        ws['I4'] = today.strftime("%B %d, %Y")
+        ws['I5'] = expiry.strftime("%B %d, %Y")
+        ws['I6'] = quote_id
+        ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
+        ws['B13'], ws['B14'] = c_phone, c_email
             
         start_row = 17
         
-        # 3. DYNAMIC ROW INSERTION
-        # This pushes the existing template's footer (Thank you, Total, etc.) down.
-        # We insert enough rows for all products: (3 data rows + 1 gap row) * num_products
-        num_products = len(final_data)
-        ws.insert_rows(start_row, num_products * 4)
+        # 2. CLEAR TEMPLATE DUMMY DATA & INSERT SPACE
+        # We find where the footer starts to avoid overwriting it
+        footer_row = 20
+        for r in range(17, 50):
+            if "Subtotal" in str(ws.cell(row=r, column=6).value) or "Total" in str(ws.cell(row=r, column=6).value):
+                footer_row = r
+                break
+        
+        # Insert exactly (4 rows per product)
+        # 3 rows for data + 1 row for gap
+        ws.insert_rows(start_row, len(final_data) * 4)
 
         for idx, block in enumerate(final_data):
             cur_top = start_row + (idx * 4) 
             
-            # 4. MANUAL MERGING (Ensures every product block is identical)
-            ws.merge_cells(start_row=cur_top, start_column=1, end_row=cur_top+2, end_column=1) # Description
-            ws.merge_cells(start_row=cur_top, start_column=4, end_row=cur_top+2, end_column=4) # Bewis No
-            ws.merge_cells(start_row=cur_top, start_column=8, end_row=cur_top+2, end_column=8) # Picture
-            ws.merge_cells(start_row=cur_top, start_column=9, end_row=cur_top+2, end_column=9) # Remark
+            # 3. APPLY MERGING (Description, Model, Picture, Remark)
+            ws.merge_cells(start_row=cur_top, start_column=1, end_row=cur_top+2, end_column=1)
+            ws.merge_cells(start_row=cur_top, start_column=4, end_row=cur_top+2, end_column=4)
+            ws.merge_cells(start_row=cur_top, start_column=8, end_row=cur_top+2, end_column=8)
+            ws.merge_cells(start_row=cur_top, start_column=9, end_row=cur_top+2, end_column=9)
             
-            # Apply Borders & Styles
             apply_block_styles(ws, cur_top)
             
-            # Write Main Data
-            ultra_safe_write(ws, cur_top, 1, "ALL")
-            ultra_safe_write(ws, cur_top, 4, block['model'])
-            ultra_safe_write(ws, cur_top, 9, block['specs'])
+            # 4. WRITE DATA
+            ws.cell(row=cur_top, column=1).value = "Inclinometer" # or block['model']
+            ws.cell(row=cur_top, column=4).value = block['model']
+            ws.cell(row=cur_top, column=9).value = block['specs']
             
-            # Center alignment for merged areas
             for c_idx in [1, 4, 9]:
                 ws.cell(row=cur_top, column=c_idx).alignment = Alignment(vertical='center', horizontal='center', wrapText=True)
             
-            # 5. Write Tiers (Qty, Price, Total)
+            # 5. WRITE PRICE TIERS
             for j, t in enumerate(block['tiers']):
                 r_idx = cur_top + j
-                ultra_safe_write(ws, r_idx, 5, t['qty'])
+                ws.cell(row=r_idx, column=5).value = t['qty']
                 if t['rmb'] > 0:
                     u_usd = round(t['rmb'] / exch_rate, 2)
-                    ultra_safe_write(ws, r_idx, 6, u_usd)
-                    ultra_safe_write(ws, r_idx, 7, round(u_usd * t['qty'], 2))
-                else:
-                    ultra_safe_write(ws, r_idx, 6, "")
-                    ultra_safe_write(ws, r_idx, 7, "")
+                    ws.cell(row=r_idx, column=6).value = u_usd
+                    ws.cell(row=r_idx, column=7).value = round(u_usd * t['qty'], 2)
 
-            # 6. Insert Product Image
+            # 6. PRODUCT IMAGE
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
                     res = requests.get(img_url, timeout=5)
                     img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (90, 90)
+                    img.width, img.height = (85, 85)
                     ws.add_image(img, f'H{cur_top}')
                 except: pass
             
         out = BytesIO()
         wb.save(out)
-        st.download_button("📥 Download Final Excel", out.getvalue(), f"{quote_id}.xlsx")
+        st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
