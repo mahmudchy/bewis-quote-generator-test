@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Side
 
-# --- 1. DATA LOADING (Standard) ---
+# --- 1. ROBUST DATA LOADING ---
 @st.cache_data
 def load_all_models():
     all_data = []
@@ -17,29 +17,42 @@ def load_all_models():
     for file in files:
         try:
             if any(x in file.lower() for x in ["template", "requirements"]): continue
-            df_raw = pd.read_csv(file, header=None).fillna('')
-            model_col_idx = -1
-            header_row = 0
-            for r_idx in range(min(len(df_raw), 25)):
-                row_vals = [str(v).strip().lower() for v in df_raw.iloc[r_idx]]
-                if 'model' in row_vals or 'bewis no' in row_vals:
-                    model_col_idx = row_vals.index('model') if 'model' in row_vals else row_vals.index('bewis no')
-                    header_row = r_idx
+            
+            # Load file
+            if file.endswith('.csv'):
+                df = pd.read_csv(file).fillna('')
+            else:
+                df = pd.read_excel(file).fillna('')
+            
+            # Standardize column names to lowercase for searching
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            
+            # Find the Model column (look for 'model', 'bewis', or 'part')
+            model_col = None
+            for col in df.columns:
+                if any(k in col for k in ['model', 'bewis', 'no.', 'part']):
+                    model_col = col
                     break
-            if model_col_idx != -1:
-                df = pd.read_excel(file, header=header_row).fillna('') if file.endswith('.xlsx') else pd.read_csv(file, header=header_row).fillna('')
-                df.columns = [str(c).strip() for c in df.columns]
-                m_col = df.columns[model_col_idx]
+            
+            if model_col:
                 for _, row in df.iterrows():
-                    m_name = str(row[m_col]).strip()
-                    if not m_name or m_name.lower() in ['model', 'nan']: continue
+                    m_name = str(row[model_col]).strip()
+                    if not m_name or m_name.lower() in ['model', 'nan', '']: continue
+                    
+                    # Gather specs
                     specs = []
                     for col in df.columns:
-                        if any(k in col.lower() for k in ['accuracy', 'range', 'axis', 'output']):
+                        if any(k in col for k in ['accuracy', 'range', 'axis', 'output', 'power']):
                             val = str(row[col]).strip()
-                            if val and val.lower() != 'nan': specs.append(f"{col}: {val}")
+                            if val and val.lower() != 'nan':
+                                specs.append(f"{col.title()}: {val}")
+                    
                     all_data.append({"Model": m_name, "Specs": "\n".join(specs)})
-        except: continue
+        except Exception as e:
+            continue
+            
+    if not all_data:
+        return pd.DataFrame(columns=["Model", "Specs"])
     return pd.DataFrame(all_data)
 
 # --- 2. IMAGE SCRAPER ---
@@ -84,20 +97,29 @@ quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country_code}"
 st.title(f"Quote Generator: {quote_id}")
 
 final_data = []
-for i, _ in enumerate(st.session_state.rows):
-    with st.expander(f"Product {i+1}", expanded=True):
-        opts = [""] + sorted(model_db['Model'].unique().tolist())
-        sel = st.selectbox("Select Model", opts, key=f"sel_{i}")
-        if sel:
-            m = model_db[model_db['Model'] == sel].iloc[0]
-            p_cols = st.columns(3)
-            r1 = p_cols[0].text_input("RMB (1pc)", "0", key=f"r1_{i}")
-            r10 = p_cols[1].text_input("RMB (10pcs)", "0", key=f"r10_{i}")
-            r100 = p_cols[2].text_input("RMB (100pcs)", "0", key=f"r100_{i}")
-            final_data.append({
-                "model": sel, "specs": m['Specs'],
-                "tiers": [{"qty": 1, "rmb": float(r1 or 0)}, {"qty": 10, "rmb": float(r10 or 0)}, {"qty": 100, "rmb": float(r100 or 0)}]
-            })
+# Fixed the KeyError by checking if model_db is empty
+if not model_db.empty:
+    for i, _ in enumerate(st.session_state.rows):
+        with st.expander(f"Product {i+1}", expanded=True):
+            opts = [""] + sorted(model_db['Model'].unique().tolist())
+            sel = st.selectbox("Select Model", opts, key=f"sel_{i}")
+            if sel:
+                m = model_db[model_db['Model'] == sel].iloc[0]
+                p_cols = st.columns(3)
+                r1 = p_cols[0].text_input("RMB (1pc)", "0", key=f"r1_{i}")
+                r10 = p_cols[1].text_input("RMB (10pcs)", "0", key=f"r10_{i}")
+                r100 = p_cols[2].text_input("RMB (100pcs)", "0", key=f"r100_{i}")
+                
+                final_data.append({
+                    "model": sel, "specs": m['Specs'],
+                    "tiers": [
+                        {"qty": 1, "rmb": float(r1 or 0)}, 
+                        {"qty": 10, "rmb": float(r10 or 0)}, 
+                        {"qty": 100, "rmb": float(r100 or 0)}
+                    ]
+                })
+else:
+    st.warning("No data found. Please ensure your product Excel files are in the folder.")
 
 if st.button("➕ Add Another Model"):
     st.session_state.rows.append({"model": ""})
@@ -109,19 +131,19 @@ if st.button("🚀 Export to Excel"):
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Header Info
+        # Meta
         ws['I4'], ws['I5'], ws['I6'] = today.strftime("%B %d, %Y"), expiry.strftime("%B %d, %Y"), quote_id
         ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
         ws['B13'], ws['B14'] = c_phone, c_email
 
-        # Find the "Remarks" row to push it down
+        # Find Footer
         footer_anchor = 17
         for r in range(1, 100):
             if str(ws.cell(row=r, column=1).value).strip() == "Remarks":
                 footer_anchor = r
                 break
         
-        # Insert exactly enough rows (3 per product + 1 spacer row)
+        # Space Insertion
         ws.insert_rows(footer_anchor, len(final_data) * 4)
 
         thin = Side(style='thin')
@@ -130,18 +152,16 @@ if st.button("🚀 Export to Excel"):
 
         current_row = footer_anchor
         for product in final_data:
-            # A. MERGE CELLS MANUALLY FOR NEW ROWS
-            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row+2, end_column=1) # Description
-            ws.merge_cells(start_row=current_row, start_column=4, end_row=current_row+2, end_column=4) # Model
-            ws.merge_cells(start_row=current_row, start_column=8, end_row=current_row+2, end_column=8) # Picture
-            ws.merge_cells(start_row=current_row, start_column=9, end_row=current_row+2, end_column=9) # Specs
+            # Merging & Formatting
+            ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row+2, end_column=1)
+            ws.merge_cells(start_row=current_row, start_column=4, end_row=current_row+2, end_column=4)
+            ws.merge_cells(start_row=current_row, start_column=8, end_row=current_row+2, end_column=8)
+            ws.merge_cells(start_row=current_row, start_column=9, end_row=current_row+2, end_column=9)
 
-            # B. WRITE CONTENT
             ws.cell(row=current_row, column=1).value = "Inclinometer"
             ws.cell(row=current_row, column=4).value = product['model']
             ws.cell(row=current_row, column=9).value = product['specs']
 
-            # C. WRITE PRICING & BORDERS
             for i, tier in enumerate(product['tiers']):
                 r_idx = current_row + i
                 ws.cell(row=r_idx, column=5).value = tier['qty']
@@ -150,12 +170,11 @@ if st.button("🚀 Export to Excel"):
                     ws.cell(row=r_idx, column=6).value = usd_val
                     ws.cell(row=r_idx, column=7).value = usd_val * tier['qty']
                 
-                # Apply borders to the full block (Cols A to I)
                 for c in range(1, 10):
                     ws.cell(row=r_idx, column=c).border = border
                     ws.cell(row=r_idx, column=c).alignment = center_align
 
-            # D. IMAGE
+            # Image
             img_url = get_bw_sensing_image(product['model'])
             if img_url:
                 try:
@@ -165,7 +184,7 @@ if st.button("🚀 Export to Excel"):
                     ws.add_image(img, f'H{current_row}')
                 except: pass
 
-            current_row += 4 # Skip 3 rows + 1 spacer
+            current_row += 4
 
         out = BytesIO()
         wb.save(out)
