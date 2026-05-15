@@ -7,8 +7,8 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.cell.cell import MergedCell, Cell
-from openpyxl.styles import Alignment
+from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment, Border, Side
 
 # --- 1. DATA LOADING ---
 @st.cache_data
@@ -63,24 +63,30 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. THE "MERGE-PROOF" WRITER ---
+# --- 3. THE STYLE & MERGE HANDLERS ---
+thin_border = Border(
+    left=Side(style='thin'), right=Side(style='thin'), 
+    top=Side(style='thin'), bottom=Side(style='thin')
+)
+
 def ultra_safe_write(ws, row, col, value):
-    """Guarantees writing to a cell even if it is a read-only MergedCell."""
     cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
-        # Find which merged range this cell belongs to
         for m_range in ws.merged_cells.ranges:
             if cell.coordinate in m_range:
-                # Write to the top-left (Master) cell of that range
                 ws.cell(row=m_range.min_row, column=m_range.min_col).value = value
                 return
-    # If it's a standard cell, write normally
     cell.value = value
+
+def apply_block_styles(ws, start_row):
+    """Applies borders to all 9 columns and 3 rows of a product block."""
+    for r in range(start_row, start_row + 3):
+        for c in range(1, 10): # Columns A to I
+            ws.cell(row=r, column=c).border = thin_border
 
 # --- 4. UI SETUP ---
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 
-# CSS to kill the increment/decrement icons for the "Excel feel"
 st.markdown("""
     <style>
     input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
@@ -122,7 +128,6 @@ for i, _ in enumerate(st.session_state.rows):
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            # Text inputs allow Enter/Tab without triggering browser icons
             r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}")
             r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}")
             r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}")
@@ -156,47 +161,4 @@ if st.button("🚀 Export to Excel"):
         # Metadata
         ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
         ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
-        ultra_safe_write(ws, 6, 9, quote_id)
-        
-        # Customer Info
-        ultra_safe_write(ws, 10, 2, c_name)
-        ultra_safe_write(ws, 11, 2, c_contact)
-        ultra_safe_write(ws, 12, 2, c_addr)
-        ultra_safe_write(ws, 13, 2, c_phone)
-        ultra_safe_write(ws, 14, 2, c_email)
-            
-        start_row = 17
-        for idx, block in enumerate(final_data):
-            cur_top = start_row + (idx * 3)
-            
-            # 1. Model & Specs (Columns 4 & 9)
-            ultra_safe_write(ws, cur_top, 4, block['model'])
-            ultra_safe_write(ws, cur_top, 9, block['specs'])
-            ultra_safe_write(ws, cur_top, 1, "ALL") # Description column
-            
-            # Align center for the merged blocks
-            for c_idx in [1, 4, 9]:
-                ws.cell(row=cur_top, column=c_idx).alignment = Alignment(vertical='center', wrapText=True)
-            
-            # 2. Tiers (Qty Col 5, Price Col 6, Total Col 7)
-            for j, t in enumerate(block['tiers']):
-                r_idx = cur_top + j
-                ultra_safe_write(ws, r_idx, 5, t['qty'])
-                if t['rmb'] > 0:
-                    u_usd = round(t['rmb'] / exch_rate, 2)
-                    ultra_safe_write(ws, r_idx, 6, u_usd)
-                    ultra_safe_write(ws, r_idx, 7, round(u_usd * t['qty'], 2))
-            
-            # 3. Image (Col 8)
-            img_url = get_bw_sensing_image(block['model'])
-            if img_url:
-                try:
-                    res = requests.get(img_url, timeout=5)
-                    img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (90, 90)
-                    ws.add_image(img, f'H{cur_top}')
-                except: pass
-            
-        out = BytesIO()
-        wb.save(out)
-        st.download_button("📥 Download Final Excel", out.getvalue(), f"{quote_id}.xlsx")
+        ultra_safe_write(ws, 6, 9
