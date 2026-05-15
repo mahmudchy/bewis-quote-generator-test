@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Side
 
-# --- 1. DATA LOADING ---
+# --- 1. DATA LOADING (UNCHANGED) ---
 @st.cache_data
 def load_all_models():
     all_data = []
@@ -110,73 +110,25 @@ if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
-# --- 4. EXPORT ENGINE ---
+# --- 4. THE EXCEL ENGINE ---
 if st.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx') and final_data:
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Metadata
+        # Header Info
         ws['I4'], ws['I5'], ws['I6'] = today.strftime("%B %d, %Y"), expiry.strftime("%B %d, %Y"), quote_id
         ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
         ws['B13'], ws['B14'] = c_phone, c_email
         
-        # 1. Identify Footer
-        footer_start_row = 20
+        # FIND THE "REMARKS" FOOTER ANCHOR
+        footer_row = 17
         for r in range(1, 100):
             if str(ws.cell(row=r, column=1).value).strip() == "Remarks":
-                footer_start_row = r
+                footer_row = r
                 break
-
-        # 2. Insert Space (4 rows per product: 3 data + 1 gap)
-        rows_to_add = len(final_data) * 4
-        ws.insert_rows(footer_start_row, rows_to_add)
-
-        # 3. Fill Data (Write to the top-most row of each 3-row block)
-        current_write_pos = footer_start_row 
-        thin = Side(style='thin')
-        border = Border(top=thin, left=thin, right=thin, bottom=thin)
-
-        for product in final_data:
-            # IMPORTANT: Set values BEFORE merging to avoid Read-Only error
-            ws.cell(row=current_write_pos, column=1).value = "ALL"
-            ws.cell(row=current_write_pos, column=4).value = product['model']
-            ws.cell(row=current_write_pos, column=9).value = product['specs']
-            
-            # MERGE rows for the block
-            ws.merge_cells(start_row=current_write_pos, start_column=1, end_row=current_write_pos+2, end_column=1)
-            ws.merge_cells(start_row=current_write_pos, start_column=4, end_row=current_write_pos+2, end_column=4)
-            ws.merge_cells(start_row=current_write_pos, start_column=8, end_row=current_write_pos+2, end_column=8)
-            ws.merge_cells(start_row=current_write_pos, start_column=9, end_row=current_write_pos+2, end_column=9)
-
-            # TIERS
-            for idx, tier in enumerate(product['tiers']):
-                row_idx = current_write_pos + idx
-                ws.cell(row=row_idx, column=5).value = tier['qty']
-                if tier['rmb'] > 0:
-                    u_usd = round(tier['rmb'] / exch_rate, 2)
-                    ws.cell(row=row_idx, column=6).value = u_usd
-                    ws.cell(row=row_idx, column=7).value = u_usd * tier['qty']
-                
-                # Borders & Alignment
-                for c in range(1, 10):
-                    ws.cell(row=row_idx, column=c).border = border
-                    ws.cell(row=row_idx, column=c).alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-            # IMAGE
-            img_url = get_bw_sensing_image(product['model'])
-            if img_url:
-                try:
-                    res = requests.get(img_url, timeout=5)
-                    img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (80, 80)
-                    ws.add_image(img, f'H{current_write_pos}')
-                except: pass
-
-            current_write_pos += 4 # Move to the next block after the 1-row gap
-
-        out = BytesIO()
-        wb.save(out)
-        st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
-    else:
-        st.error("Template missing or no products added.")
+        
+        # INSERT ROWS TO PUSH FOOTER DOWN
+        # We need 4 rows per model (3 for data, 1 for the gap)
+        needed_rows = len(final_data) * 4
+        ws.insert_rows(footer_row, needed_rows)
