@@ -19,10 +19,7 @@ def load_all_models():
             if any(x in file.lower() for x in ["template", "requirements"]): continue
             df = pd.read_excel(file).fillna('') if file.endswith('.xlsx') else pd.read_csv(file).fillna('')
             df.columns = [str(c).strip().lower() for c in df.columns]
-            
-            # Find Model Column
             model_col = next((c for c in df.columns if any(k in c for k in ['model', 'bewis', 'part'])), None)
-            
             if model_col:
                 for _, row in df.iterrows():
                     m_name = str(row[model_col]).strip()
@@ -68,7 +65,7 @@ with st.sidebar:
 today = datetime.date.today()
 quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country.upper()}"
 
-st.title(f"Generator: {quote_id}")
+st.title(f"Quote: {quote_id}")
 
 final_data = []
 for i, _ in enumerate(st.session_state.rows):
@@ -96,51 +93,50 @@ if st.button("🚀 Export to Excel"):
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Header Info
+        # Meta & Header
         ws['I4'], ws['I6'] = today.strftime("%B %d, %Y"), quote_id
         ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
         ws['B13'], ws['B14'] = c_phone, c_email
 
-        # Fixed Start Row (Model 1 always starts at row 17)
         start_row = 17
         thin = Side(style='thin')
         border = Border(top=thin, left=thin, right=thin, bottom=thin)
         center = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
         for idx, product in enumerate(final_data):
-            # Calculate current position
+            # Calculate where this block should go
             current_pos = start_row + (idx * 3)
             
-            # If it's not the first model, insert 3 fresh rows to make space
+            # If it's the second model or later, insert 3 new rows below the previous one
             if idx > 0:
                 ws.insert_rows(current_pos, 3)
 
-            # 1. MERGE (A, D, H, I)
-            ws.merge_cells(start_row=current_pos, start_column=1, end_row=current_pos+2, end_column=1)
-            ws.merge_cells(start_row=current_pos, start_column=4, end_row=current_pos+2, end_column=4)
-            ws.merge_cells(start_row=current_row:=current_pos, start_column=8, end_row=current_pos+2, end_column=8)
-            ws.merge_cells(start_row=current_pos, start_column=9, end_row=current_pos+2, end_column=9)
+            # 1. Apply Merges for the 3-row block
+            ws.merge_cells(start_row=current_pos, start_column=1, end_row=current_pos+2, end_column=1) # Desc
+            ws.merge_cells(start_row=current_pos, start_column=4, end_row=current_pos+2, end_column=4) # Model
+            ws.merge_cells(start_row=current_pos, start_column=8, end_row=current_pos+2, end_column=8) # Pic
+            ws.merge_cells(start_row=current_pos, start_column=9, end_row=current_pos+2, end_column=9) # Specs
 
-            # 2. DATA
+            # 2. Add Values
             ws.cell(row=current_pos, column=1).value = "Inclinometer"
             ws.cell(row=current_pos, column=4).value = product['model']
             ws.cell(row=current_pos, column=9).value = product['specs']
 
-            # 3. TIERS & BORDERS
-            for sub_i, tier in enumerate(product['tiers']):
-                r_idx = current_pos + sub_i
-                ws.cell(row=r_idx, column=5).value = tier['qty']
+            # 3. Tiers & Borders
+            for sub_idx, tier in enumerate(product['tiers']):
+                r_num = current_pos + sub_idx
+                ws.cell(row=r_num, column=5).value = tier['qty']
                 if tier['rmb'] > 0:
                     u_usd = round(tier['rmb'] / exch_rate, 2)
-                    ws.cell(row=r_idx, column=6).value = u_usd
-                    ws.cell(row=r_idx, column=7).value = u_usd * tier['qty']
+                    ws.cell(row=r_num, column=6).value = u_usd
+                    ws.cell(row=r_num, column=7).value = round(u_usd * tier['qty'], 2)
                 
-                # Format all cells in row
-                for col_idx in range(1, 10):
-                    ws.cell(row=r_idx, column=col_idx).border = border
-                    ws.cell(row=r_idx, column=col_idx).alignment = center
+                # Apply Style to all 9 columns for each of the 3 rows
+                for col_num in range(1, 10):
+                    ws.cell(row=r_num, column=col_num).border = border
+                    ws.cell(row=r_num, column=col_num).alignment = center
 
-            # 4. IMAGE
+            # 4. Handle Image
             img_url = get_bw_sensing_image(product['model'])
             if img_url:
                 try:
@@ -153,3 +149,5 @@ if st.button("🚀 Export to Excel"):
         out = BytesIO()
         wb.save(out)
         st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
+    else:
+        st.error("Check if template.xlsx exists and you added models.")
