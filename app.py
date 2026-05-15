@@ -7,9 +7,8 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.cell.cell import MergedCell
+from openpyxl.cell.cell import MergedCell, Cell
 from openpyxl.styles import Alignment
-from fpdf import FPDF
 
 # --- 1. DATA LOADING ---
 @st.cache_data
@@ -64,28 +63,24 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. EXCEL HELPERS ---
-def safe_write(ws, row, col, value):
-    """Writes to a cell, finding the master cell if it's part of a merge."""
+# --- 3. THE "MERGE-PROOF" WRITER ---
+def ultra_safe_write(ws, row, col, value):
+    """Guarantees writing to a cell even if it is a read-only MergedCell."""
     cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
-        for merged_range in ws.merged_cells.ranges:
-            if cell.coordinate in merged_range:
-                ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = value
+        # Find which merged range this cell belongs to
+        for m_range in ws.merged_cells.ranges:
+            if cell.coordinate in m_range:
+                # Write to the top-left (Master) cell of that range
+                ws.cell(row=m_range.min_row, column=m_range.min_col).value = value
                 return
+    # If it's a standard cell, write normally
     cell.value = value
-
-def safe_merge(ws, start_row, start_col, end_row, end_col):
-    """Merges cells only if they aren't already part of a merge."""
-    cell = ws.cell(row=start_row, column=start_col)
-    is_merged = any(cell.coordinate in r for r in ws.merged_cells.ranges)
-    if not is_merged:
-        ws.merge_cells(start_row=start_row, start_column=start_col, 
-                       end_row=end_row, end_column=end_col)
 
 # --- 4. UI SETUP ---
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 
+# CSS to kill the increment/decrement icons for the "Excel feel"
 st.markdown("""
     <style>
     input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
@@ -127,84 +122,17 @@ for i, _ in enumerate(st.session_state.rows):
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}", value="")
-            r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}", value="")
-            r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}", value="")
+            # Text inputs allow Enter/Tab without triggering browser icons
+            r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}")
+            r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}")
+            r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}")
             
             def to_num(val):
-                try: return float(val.replace(',', '')) if val.strip() else 0.0
+                try: return float(str(val).replace(',', '')) if val else 0.0
                 except: return 0.0
 
             r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
             
             if r1 > 0 or r10 > 0 or r100 > 0:
                 final_data.append({
-                    "model": sel, "specs": m['Specs'],
-                    "tiers": [
-                        {"qty": 1, "rmb": r1},
-                        {"qty": 10, "rmb": r10},
-                        {"qty": 100, "rmb": r100}
-                    ]
-                })
-
-if st.button("➕ Add Another Product Line"):
-    st.session_state.rows.append({"model": ""})
-    st.rerun()
-
-# --- 5. EXPORT ---
-if st.button("🚀 Export to Excel"):
-    if os.path.exists('template.xlsx') and final_data:
-        wb = load_workbook('template.xlsx')
-        ws = wb.active
-        
-        # Metadata
-        safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
-        safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
-        safe_write(ws, 6, 9, quote_id)
-        
-        # Customer Info
-        safe_write(ws, 10, 2, c_name)
-        safe_write(ws, 11, 2, c_contact)
-        safe_write(ws, 12, 2, c_addr)
-        safe_write(ws, 13, 2, c_phone)
-        safe_write(ws, 14, 2, c_email)
-            
-        cur_row = 17
-        for block in final_data:
-            # A(1)=Desc, D(4)=Model, H(8)=Pic, I(9)=Remark
-            for col_idx in [1, 4, 8, 9]:
-                safe_merge(ws, cur_row, col_idx, cur_row + 2, col_idx)
-            
-            # Write merged content
-            safe_write(ws, cur_row, 1, "ALL")
-            safe_write(ws, cur_row, 4, block['model'])
-            safe_write(ws, cur_row, 9, block['specs'])
-            
-            # Formatting
-            for col in [1, 4, 9]:
-                ws.cell(row=cur_row, column=col).alignment = Alignment(vertical='center', wrapText=True)
-            
-            # Tiers (Qty, Price, Total)
-            for j, t in enumerate(block['tiers']):
-                r_idx = cur_row + j
-                safe_write(ws, r_idx, 5, t['qty'])
-                if t['rmb'] > 0:
-                    u_price = round(t['rmb'] / exch_rate, 2)
-                    safe_write(ws, r_idx, 6, u_price)
-                    safe_write(ws, r_idx, 7, round(u_price * t['qty'], 2))
-            
-            # Image
-            img_url = get_bw_sensing_image(block['model'])
-            if img_url:
-                try:
-                    res = requests.get(img_url, timeout=5)
-                    img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (90, 90)
-                    ws.add_image(img, f'H{cur_row}')
-                except: pass
-            
-            cur_row += 3
-            
-        out = BytesIO()
-        wb.save(out)
-        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx")
+                    "model":
