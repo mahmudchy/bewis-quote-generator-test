@@ -132,3 +132,53 @@ if st.button("🚀 Export to Excel"):
         # We need 4 rows per model (3 for data, 1 for the gap)
         needed_rows = len(final_data) * 4
         ws.insert_rows(footer_row, needed_rows)
+        
+        # STARTING POSITION FOR DATA
+        write_pos = footer_row 
+        thin = Side(style='thin')
+        border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+        for product in final_data:
+            # A. WRITE VALUES FIRST (Avoids the 'Read-Only MergedCell' Error)
+            ws.cell(row=write_pos, column=1).value = "Inclinometer"
+            ws.cell(row=write_pos, column=4).value = product['model']
+            ws.cell(row=write_pos, column=9).value = product['specs']
+            
+            # B. APPLY MERGES ACROSS 3 ROWS
+            ws.merge_cells(start_row=write_pos, start_column=1, end_row=write_pos+2, end_column=1) # Desc
+            ws.merge_cells(start_row=write_pos, start_column=4, end_row=write_pos+2, end_column=4) # Model
+            ws.merge_cells(start_row=write_pos, start_column=8, end_row=write_pos+2, end_column=8) # Picture
+            ws.merge_cells(start_row=write_pos, start_column=9, end_row=write_pos+2, end_column=9) # Specs
+            
+            # C. TIERED PRICING
+            for idx, tier in enumerate(product['tiers']):
+                curr_r = write_pos + idx
+                ws.cell(row=curr_r, column=5).value = tier['qty']
+                if tier['rmb'] > 0:
+                    u_usd = round(tier['rmb'] / exch_rate, 2)
+                    ws.cell(row=curr_r, column=6).value = u_usd
+                    ws.cell(row=curr_r, column=7).value = u_usd * tier['qty']
+                
+                # Apply Style to each cell in the 3x9 product grid
+                for c in range(1, 10):
+                    ws.cell(row=curr_r, column=c).border = border
+                    ws.cell(row=curr_r, column=c).alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+            # D. ADD IMAGE
+            img_url = get_bw_sensing_image(product['model'])
+            if img_url:
+                try:
+                    res = requests.get(img_url, timeout=5)
+                    img = XLImage(BytesIO(res.content))
+                    img.width, img.height = (80, 80)
+                    ws.add_image(img, f'H{write_pos}')
+                except: pass
+            
+            # MOVE TO NEXT MODEL (+1 for the spacer row gap)
+            write_pos += 4
+
+        out = BytesIO()
+        wb.save(out)
+        st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
+    else:
+        st.error("Template missing or no data added.")
