@@ -7,9 +7,10 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Side
 
-# --- 1. DATA LOADING (UNCHANGED) ---
+# --- 1. DATA LOADING ---
 @st.cache_data
 def load_all_models():
     all_data = []
@@ -62,7 +63,17 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. UI SETUP ---
+# --- 3. THE "MERGE-PROOF" WRITER ---
+def ultra_safe_write(ws, row, col, value):
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        for m_range in ws.merged_cells.ranges:
+            if cell.coordinate in m_range:
+                ws.cell(row=m_range.min_row, column=m_range.min_col).value = value
+                return
+    cell.value = value
+
+# --- 4. UI SETUP ---
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 model_db = load_all_models()
 
@@ -70,7 +81,7 @@ if 'rows' not in st.session_state:
     st.session_state.rows = [{"model": ""}]
 
 with st.sidebar:
-    st.title("Settings")
+    st.title("Control Panel")
     exch_rate = st.number_input("RMB to USD Rate", value=6.82, step=0.01)
     st.divider()
     c_name = st.text_input("Customer Name")
@@ -94,91 +105,85 @@ for i, _ in enumerate(st.session_state.rows):
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            r1 = p_cols[0].text_input("RMB (1pc)", "0", key=f"r1_{i}")
-            r10 = p_cols[1].text_input("RMB (10pcs)", "0", key=f"r10_{i}")
-            r100 = p_cols[2].text_input("RMB (100pcs)", "0", key=f"r100_{i}")
+            r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}")
+            r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}")
+            r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}")
+            
+            def to_num(val):
+                try: return float(str(val).replace(',', '')) if val else 0.0
+                except: return 0.0
+
+            r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
             final_data.append({
                 "model": sel, "specs": m['Specs'],
-                "tiers": [
-                    {"qty": 1, "rmb": float(r1.replace(',', '') or 0)},
-                    {"qty": 10, "rmb": float(r10.replace(',', '') or 0)},
-                    {"qty": 100, "rmb": float(r100.replace(',', '') or 0)}
-                ]
+                "tiers": [{"qty": 1, "rmb": r1}, {"qty": 10, "rmb": r10}, {"qty": 100, "rmb": r100}]
             })
 
 if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
-# --- 4. THE EXCEL ENGINE ---
+# --- 5. EXPORT ---
 if st.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx') and final_data:
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Header Info
-        ws['I4'], ws['I5'], ws['I6'] = today.strftime("%B %d, %Y"), expiry.strftime("%B %d, %Y"), quote_id
-        ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
-        ws['B13'], ws['B14'] = c_phone, c_email
-        
-        # FIND THE "REMARKS" FOOTER ANCHOR
-        footer_row = 17
+        # Styles
+        thin = Side(style='thin')
+        border_style = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+        # Metadata & Customer Info
+        ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
+        ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
+        ultra_safe_write(ws, 6, 9, quote_id)
+        for row_info in [(10, c_name), (11, c_contact), (12, c_addr), (13, c_phone), (14, c_email)]:
+            ultra_safe_write(ws, row_info[0], 2, row_info[1])
+
+        # 1. Identify Footer Anchor
+        anchor_row = 17
         for r in range(1, 100):
             if str(ws.cell(row=r, column=1).value).strip() == "Remarks":
-                footer_row = r
+                anchor_row = r
                 break
-        
-        # INSERT ROWS TO PUSH FOOTER DOWN
-        # We need 4 rows per model (3 for data, 1 for the gap)
-        needed_rows = len(final_data) * 4
-        ws.insert_rows(footer_row, needed_rows)
-        
-        # STARTING POSITION FOR DATA
-        write_pos = footer_row 
-        thin = Side(style='thin')
-        border = Border(top=thin, left=thin, right=thin, bottom=thin)
 
-        for product in final_data:
-            # A. WRITE VALUES FIRST (Avoids the 'Read-Only MergedCell' Error)
-            ws.cell(row=write_pos, column=1).value = "Inclinometer"
-            ws.cell(row=write_pos, column=4).value = product['model']
-            ws.cell(row=write_pos, column=9).value = product['specs']
+        # 2. Insert Space (4 rows per product: 3 data + 1 gap)
+        ws.insert_rows(anchor_row, len(final_data) * 4)
+        
+        write_pos = anchor_row
+        for block in final_data:
+            # 3. Write and Align
+            ultra_safe_write(ws, write_pos, 1, "Inclinometer")
+            ultra_safe_write(ws, write_pos, 4, block['model'])
+            ultra_safe_write(ws, write_pos, 9, block['specs'])
             
-            # B. APPLY MERGES ACROSS 3 ROWS
-            ws.merge_cells(start_row=write_pos, start_column=1, end_row=write_pos+2, end_column=1) # Desc
-            ws.merge_cells(start_row=write_pos, start_column=4, end_row=write_pos+2, end_column=4) # Model
-            ws.merge_cells(start_row=write_pos, start_column=8, end_row=write_pos+2, end_column=8) # Picture
-            ws.merge_cells(start_row=write_pos, start_column=9, end_row=write_pos+2, end_column=9) # Specs
-            
-            # C. TIERED PRICING
-            for idx, tier in enumerate(product['tiers']):
-                curr_r = write_pos + idx
-                ws.cell(row=curr_r, column=5).value = tier['qty']
-                if tier['rmb'] > 0:
-                    u_usd = round(tier['rmb'] / exch_rate, 2)
-                    ws.cell(row=curr_r, column=6).value = u_usd
-                    ws.cell(row=curr_r, column=7).value = u_usd * tier['qty']
-                
-                # Apply Style to each cell in the 3x9 product grid
+            # Apply Borders to the entire 3x9 product area
+            for r in range(write_pos, write_pos + 3):
                 for c in range(1, 10):
-                    ws.cell(row=curr_r, column=c).border = border
-                    ws.cell(row=curr_r, column=c).alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                    ws.cell(row=r, column=c).border = border_style
+                    ws.cell(row=r, column=c).alignment = Alignment(vertical='center', horizontal='center', wrapText=True)
 
-            # D. ADD IMAGE
-            img_url = get_bw_sensing_image(product['model'])
+            # 4. Tiers
+            for j, t in enumerate(block['tiers']):
+                curr_r = write_pos + j
+                ultra_safe_write(ws, curr_r, 5, t['qty'])
+                if t['rmb'] > 0:
+                    u_usd = round(t['rmb'] / exch_rate, 2)
+                    ultra_safe_write(ws, curr_r, 6, u_usd)
+                    ultra_safe_write(ws, curr_r, 7, round(u_usd * t['qty'], 2))
+            
+            # 5. Image
+            img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
                     res = requests.get(img_url, timeout=5)
                     img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (80, 80)
+                    img.width, img.height = (85, 85)
                     ws.add_image(img, f'H{write_pos}')
                 except: pass
             
-            # MOVE TO NEXT MODEL (+1 for the spacer row gap)
-            write_pos += 4
+            write_pos += 4 # Move to next model with 1-row gap
 
         out = BytesIO()
         wb.save(out)
         st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
-    else:
-        st.error("Template missing or no data added.")
