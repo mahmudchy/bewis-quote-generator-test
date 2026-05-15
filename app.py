@@ -86,102 +86,17 @@ quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country_code}"
 
 st.title(f"Quote: {quote_id}")
 
-# --- 4. DYNAMIC PRODUCT ROWS ---
 final_data = []
 for i, _ in enumerate(st.session_state.rows):
     with st.expander(f"Product {i+1}", expanded=True):
         opts = [""] + sorted(model_db['Model'].unique().tolist())
         sel = st.selectbox("Search & Select Model", opts, key=f"sel_{i}")
-        
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
             r1 = p_cols[0].text_input("RMB (1pc)", "0", key=f"r1_{i}")
             r10 = p_cols[1].text_input("RMB (10pcs)", "0", key=f"r10_{i}")
             r100 = p_cols[2].text_input("RMB (100pcs)", "0", key=f"r100_{i}")
-            
             final_data.append({
                 "model": sel, "specs": m['Specs'],
-                "tiers": [
-                    {"qty": 1, "rmb": float(r1.replace(',', '') or 0)},
-                    {"qty": 10, "rmb": float(r10.replace(',', '') or 0)},
-                    {"qty": 100, "rmb": float(r100.replace(',', '') or 0)}
-                ]
-            })
-
-if st.button("➕ Add Another Product Line"):
-    st.session_state.rows.append({"model": ""})
-    st.rerun()
-
-# --- 5. EXCEL EXPORT ENGINE ---
-if st.button("🚀 Export to Excel"):
-    if os.path.exists('template.xlsx') and final_data:
-        wb = load_workbook('template.xlsx')
-        ws = wb.active
-        
-        # Metadata & Customer Info
-        ws['I4'], ws['I5'], ws['I6'] = today.strftime("%B %d, %Y"), expiry.strftime("%B %d, %Y"), quote_id
-        ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
-        ws['B13'], ws['B14'] = c_phone, c_email
-        
-        # DYNAMIC FOOTER DETECTION
-        # Finds "Remarks" in Column A to treat everything below it as the footer
-        footer_start_row = 20
-        for r in range(1, 100):
-            if str(ws.cell(row=r, column=1).value).strip() == "Remarks":
-                footer_start_row = r
-                break
-
-        # INSERT ROWS ABOVE FOOTER
-        # Pushes the footer down to avoid "big mess"
-        rows_per_block = 4 # 3 data rows + 1 gap row
-        ws.insert_rows(footer_start_row, len(final_data) * rows_per_block)
-
-        current_row = footer_start_row # Start adding above the newly pushed footer
-        thin = Side(style='thin')
-        border = Border(top=thin, left=thin, right=thin, bottom=thin)
-
-        for product in final_data:
-            # Writing upwards or shifting start index
-            write_row = current_row - (len(final_data) * rows_per_block) + (final_data.index(product) * rows_per_block)
-            
-            # MERGE BLOCKS
-            ws.merge_cells(start_row=write_row, start_column=1, end_row=write_row+2, end_column=1)
-            ws.merge_cells(start_row=write_row, start_column=4, end_row=write_row+2, end_column=4)
-            ws.merge_cells(start_row=write_row, start_column=8, end_row=write_row+2, end_column=8)
-            ws.merge_cells(start_row=write_row, start_column=9, end_row=write_row+2, end_column=9)
-
-            # DATA ENTRY
-            ws.cell(row=write_row, column=1).value = "ALL"
-            ws.cell(row=write_row, column=4).value = product['model']
-            ws.cell(row=write_row, column=9).value = product['specs']
-            
-            # TIERED PRICING
-            for idx, tier in enumerate(product['tiers']):
-                r = write_row + idx
-                ws.cell(row=r, column=5).value = tier['qty']
-                if tier['rmb'] > 0:
-                    u_usd = round(tier['rmb'] / exch_rate, 2)
-                    ws.cell(row=r, column=6).value = u_usd
-                    ws.cell(row=r, column=7).value = u_usd * tier['qty']
-                
-                # Apply Borders & Alignment
-                for c in range(1, 10):
-                    ws.cell(row=r, column=c).border = border
-                    ws.cell(row=r, column=c).alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-            # IMAGE INJECTION
-            img_url = get_bw_sensing_image(product['model'])
-            if img_url:
-                try:
-                    res = requests.get(img_url, timeout=5)
-                    img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (80, 80)
-                    ws.add_image(img, f'H{write_row}')
-                except: pass
-
-        out = BytesIO()
-        wb.save(out)
-        st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
-    else:
-        st.error("Template not found or no products added.")
+                "tiers":
