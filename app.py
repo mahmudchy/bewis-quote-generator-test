@@ -161,4 +161,54 @@ if st.button("🚀 Export to Excel"):
         # Metadata
         ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
         ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
-        ultra_safe_write(ws, 6, 9
+        ultra_safe_write(ws, 6, 9, quote_id)
+        
+        # Customer Info
+        ultra_safe_write(ws, 10, 2, c_name)
+        ultra_safe_write(ws, 11, 2, c_contact)
+        ultra_safe_write(ws, 12, 2, c_addr)
+        ultra_safe_write(ws, 13, 2, c_phone)
+        ultra_safe_write(ws, 14, 2, c_email)
+            
+        start_row = 17
+        for idx, block in enumerate(final_data):
+            # Blocks are 3 rows + 1 empty row gap = 4 rows total per product
+            cur_top = start_row + (idx * 4) 
+            
+            # Apply Borders to the entire 3-row block
+            apply_block_styles(ws, cur_top)
+            
+            # Write Merged Values (ensure Description is "ALL")
+            ultra_safe_write(ws, cur_top, 1, "ALL")
+            ultra_safe_write(ws, cur_top, 4, block['model'])
+            ultra_safe_write(ws, cur_top, 9, block['specs'])
+            
+            # Vertical Alignment for Merged Cells
+            for c_idx in [1, 4, 9]:
+                ws.cell(row=cur_top, column=c_idx).alignment = Alignment(vertical='center', horizontal='center', wrapText=True)
+            
+            # Tiers (Qty, Price, Total)
+            for j, t in enumerate(block['tiers']):
+                r_idx = cur_top + j
+                ultra_safe_write(ws, r_idx, 5, t['qty'])
+                if t['rmb'] > 0:
+                    u_usd = round(t['rmb'] / exch_rate, 2)
+                    ultra_safe_write(ws, r_idx, 6, u_usd)
+                    ultra_safe_write(ws, r_idx, 7, round(u_usd * t['qty'], 2))
+                else:
+                    ultra_safe_write(ws, r_idx, 6, "")
+                    ultra_safe_write(ws, r_idx, 7, "")
+
+            # Image (Col 8)
+            img_url = get_bw_sensing_image(block['model'])
+            if img_url:
+                try:
+                    res = requests.get(img_url, timeout=5)
+                    img = XLImage(BytesIO(res.content))
+                    img.width, img.height = (90, 90)
+                    ws.add_image(img, f'H{cur_top}')
+                except: pass
+            
+        out = BytesIO()
+        wb.save(out)
+        st.download_button("📥 Download Final Excel", out.getvalue(), f"{quote_id}.xlsx")
