@@ -80,7 +80,7 @@ for i, _ in enumerate(st.session_state.rows):
             r100 = cols[2].text_input("Price (100pcs)", "0", key=f"p100_{i}")
             final_data.append({
                 "model": sel, "specs": m['Specs'],
-                "tiers": [{"qty": 1, "rmb": float(r1)}, {"qty": 10, "rmb": float(r10)}, {"qty": 100, "rmb": float(r100)}]
+                "tiers": [{"qty": 1, "rmb": float(r1 or 0)}, {"qty": 10, "rmb": float(r10 or 0)}, {"qty": 100, "rmb": float(r100 or 0)}]
             })
 
 if st.button("➕ Add Another Model"):
@@ -93,61 +93,67 @@ if st.button("🚀 Export to Excel"):
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Meta & Header
+        # 1. Update Header Info
         ws['I4'], ws['I6'] = today.strftime("%B %d, %Y"), quote_id
         ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
         ws['B13'], ws['B14'] = c_phone, c_email
 
-        start_row = 17
+        # Formatting Constants
         thin = Side(style='thin')
         border = Border(top=thin, left=thin, right=thin, bottom=thin)
         center = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
+        # START POSITION
+        # Model 1 uses 17, 18, 19. 
+        # Row 20 is the empty spacer before Remarks.
+        
         for idx, product in enumerate(final_data):
-            # Calculate where this block should go
-            current_pos = start_row + (idx * 3)
-            
-            # If it's the second model or later, insert 3 new rows below the previous one
-            if idx > 0:
-                ws.insert_rows(current_pos, 3)
+            if idx == 0:
+                # First model goes into the existing template rows
+                write_pos = 17
+            else:
+                # For every additional model, insert 3 rows ABOVE the footer (currently at row 20)
+                # This pushes everything from row 20 downwards
+                write_pos = 17 + (idx * 3)
+                ws.insert_rows(write_pos, 3)
 
-            # 1. Apply Merges for the 3-row block
-            ws.merge_cells(start_row=current_pos, start_column=1, end_row=current_pos+2, end_column=1) # Desc
-            ws.merge_cells(start_row=current_pos, start_column=4, end_row=current_pos+2, end_column=4) # Model
-            ws.merge_cells(start_row=current_pos, start_column=8, end_row=current_pos+2, end_column=8) # Pic
-            ws.merge_cells(start_row=current_pos, start_column=9, end_row=current_pos+2, end_column=9) # Specs
+            # A. Apply Merges
+            ws.merge_cells(start_row=write_pos, start_column=1, end_row=write_pos+2, end_column=1)
+            ws.merge_cells(start_row=write_pos, start_column=4, end_row=write_pos+2, end_column=4)
+            ws.merge_cells(start_row=write_pos, start_column=8, end_row=write_pos+2, end_column=8)
+            ws.merge_cells(start_row=write_pos, start_column=9, end_row=write_pos+2, end_column=9)
 
-            # 2. Add Values
-            ws.cell(row=current_pos, column=1).value = "Inclinometer"
-            ws.cell(row=current_pos, column=4).value = product['model']
-            ws.cell(row=current_pos, column=9).value = product['specs']
+            # B. Add Values
+            ws.cell(row=write_pos, column=1).value = "Inclinometer"
+            ws.cell(row=write_pos, column=4).value = product['model']
+            ws.cell(row=write_pos, column=9).value = product['specs']
 
-            # 3. Tiers & Borders
-            for sub_idx, tier in enumerate(product['tiers']):
-                r_num = current_pos + sub_idx
-                ws.cell(row=r_num, column=5).value = tier['qty']
+            # C. Pricing & Borders
+            for sub_r in range(3):
+                row_idx = write_pos + sub_r
+                tier = product['tiers'][sub_r]
+                
+                ws.cell(row=row_idx, column=5).value = tier['qty']
                 if tier['rmb'] > 0:
                     u_usd = round(tier['rmb'] / exch_rate, 2)
-                    ws.cell(row=r_num, column=6).value = u_usd
-                    ws.cell(row=r_num, column=7).value = round(u_usd * tier['qty'], 2)
+                    ws.cell(row=row_idx, column=6).value = u_usd
+                    ws.cell(row=row_idx, column=7).value = round(u_usd * tier['qty'], 2)
                 
-                # Apply Style to all 9 columns for each of the 3 rows
-                for col_num in range(1, 10):
-                    ws.cell(row=r_num, column=col_num).border = border
-                    ws.cell(row=r_num, column=col_num).alignment = center
+                # Apply Borders and Alignment to the whole row
+                for col_idx in range(1, 10):
+                    ws.cell(row=row_idx, column=col_idx).border = border
+                    ws.cell(row=row_idx, column=col_idx).alignment = center
 
-            # 4. Handle Image
+            # D. Image
             img_url = get_bw_sensing_image(product['model'])
             if img_url:
                 try:
                     res = requests.get(img_url, timeout=5)
                     img = XLImage(BytesIO(res.content))
                     img.width, img.height = (80, 80)
-                    ws.add_image(img, f'H{current_pos}')
+                    ws.add_image(img, f'H{write_pos}')
                 except: pass
 
         out = BytesIO()
         wb.save(out)
         st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
-    else:
-        st.error("Check if template.xlsx exists and you added models.")
