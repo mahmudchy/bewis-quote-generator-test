@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment
 from fpdf import FPDF
 
@@ -63,10 +64,28 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. UI SETUP ---
+# --- 3. EXCEL HELPERS ---
+def safe_write(ws, row, col, value):
+    """Writes to a cell, finding the master cell if it's part of a merge."""
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        for merged_range in ws.merged_cells.ranges:
+            if cell.coordinate in merged_range:
+                ws.cell(row=merged_range.min_row, column=merged_range.min_col).value = value
+                return
+    cell.value = value
+
+def safe_merge(ws, start_row, start_col, end_row, end_col):
+    """Merges cells only if they aren't already part of a merge."""
+    cell = ws.cell(row=start_row, column=start_col)
+    is_merged = any(cell.coordinate in r for r in ws.merged_cells.ranges)
+    if not is_merged:
+        ws.merge_cells(start_row=start_row, start_column=start_col, 
+                       end_row=end_row, end_column=end_col)
+
+# --- 4. UI SETUP ---
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
 
-# Aggressive CSS to hide number input UI elements for a cleaner feel
 st.markdown("""
     <style>
     input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
@@ -108,7 +127,6 @@ for i, _ in enumerate(st.session_state.rows):
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
             p_cols = st.columns(3)
-            # Using text_input for RMB to ensure no browser "X" or buttons appear
             r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}", value="")
             r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}", value="")
             r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}", value="")
@@ -133,49 +151,49 @@ if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
-# --- 4. EXPORT ---
+# --- 5. EXPORT ---
 if st.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx') and final_data:
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # Metadata & Customer Info
-        ws['I4'] = today.strftime("%B %d, %Y")
-        ws['I5'] = expiry.strftime("%B %d, %Y")
-        ws['I6'] = quote_id
-        ws['B10'], ws['B11'], ws['B12'], ws['B13'], ws['B14'] = c_name, c_contact, c_addr, c_phone, c_email
+        # Metadata
+        safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
+        safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
+        safe_write(ws, 6, 9, quote_id)
+        
+        # Customer Info
+        safe_write(ws, 10, 2, c_name)
+        safe_write(ws, 11, 2, c_contact)
+        safe_write(ws, 12, 2, c_addr)
+        safe_write(ws, 13, 2, c_phone)
+        safe_write(ws, 14, 2, c_email)
             
         cur_row = 17
         for block in final_data:
-            # 1. Force Merge cells for the 3-row block to maintain layout
-            # Cols: A(1)=Desc, D(4)=Model, H(8)=Pic, I(9)=Remark
+            # A(1)=Desc, D(4)=Model, H(8)=Pic, I(9)=Remark
             for col_idx in [1, 4, 8, 9]:
-                # Check if already merged (template might have row 17-19 merged)
-                cell_coord = ws.cell(row=cur_row, column=col_idx).coordinate
-                is_merged = any(cell_coord in r for r in ws.merged_cells.ranges)
-                if not is_merged:
-                    ws.merge_cells(start_row=cur_row, start_column=col_idx, 
-                                   end_row=cur_row + 2, end_column=col_idx)
+                safe_merge(ws, cur_row, col_idx, cur_row + 2, col_idx)
             
-            # 2. Write Merged Values
-            ws.cell(row=cur_row, column=1).value = "ALL" #
-            ws.cell(row=cur_row, column=4).value = block['model']
-            ws.cell(row=cur_row, column=9).value = block['specs']
+            # Write merged content
+            safe_write(ws, cur_row, 1, "ALL")
+            safe_write(ws, cur_row, 4, block['model'])
+            safe_write(ws, cur_row, 9, block['specs'])
             
-            # Align text to center vertically
+            # Formatting
             for col in [1, 4, 9]:
                 ws.cell(row=cur_row, column=col).alignment = Alignment(vertical='center', wrapText=True)
             
-            # 3. Write Tiered Quantities, Prices, and Totals
+            # Tiers (Qty, Price, Total)
             for j, t in enumerate(block['tiers']):
                 r_idx = cur_row + j
-                ws.cell(row=r_idx, column=5).value = t['qty']
+                safe_write(ws, r_idx, 5, t['qty'])
                 if t['rmb'] > 0:
                     u_price = round(t['rmb'] / exch_rate, 2)
-                    ws.cell(row=r_idx, column=6).value = u_price
-                    ws.cell(row=r_idx, column=7).value = u_price * t['qty'] # Line Total
+                    safe_write(ws, r_idx, 6, u_price)
+                    safe_write(ws, r_idx, 7, round(u_price * t['qty'], 2))
             
-            # 4. Insert Picture
+            # Image
             img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
@@ -185,8 +203,8 @@ if st.button("🚀 Export to Excel"):
                     ws.add_image(img, f'H{cur_row}')
                 except: pass
             
-            cur_row += 3 # Move to the next 3-row block
+            cur_row += 3
             
         out = BytesIO()
         wb.save(out)
-        st.download_button("📥 Download Excel File", out.getvalue(), f"{quote_id}.xlsx")
+        st.download_button("📥 Download Excel", out.getvalue(), f"{quote_id}.xlsx")
