@@ -7,7 +7,8 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Border, Side
+from openpyxl.cell.cell import MergedCell, Cell
+from openpyxl.styles import Alignment
 
 # --- 1. DATA LOADING ---
 @st.cache_data
@@ -17,14 +18,27 @@ def load_all_models():
     for file in files:
         try:
             if any(x in file.lower() for x in ["template", "requirements"]): continue
-            df = pd.read_excel(file).fillna('') if file.endswith('.xlsx') else pd.read_csv(file).fillna('')
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            model_col = next((c for c in df.columns if any(k in c for k in ['model', 'bewis', 'part'])), None)
-            if model_col:
+            df_raw = pd.read_csv(file, header=None).fillna('') if file.endswith('.csv') else pd.read_excel(file, header=None).fillna('')
+            model_col_idx = -1
+            header_row = 0
+            for r_idx in range(min(len(df_raw), 25)):
+                row_vals = [str(v).strip().lower() for v in df_raw.iloc[r_idx]]
+                if 'model' in row_vals or 'bewis no' in row_vals:
+                    model_col_idx = row_vals.index('model') if 'model' in row_vals else row_vals.index('bewis no')
+                    header_row = r_idx
+                    break
+            if model_col_idx != -1:
+                df = pd.read_csv(file, header=header_row).fillna('') if file.endswith('.csv') else pd.read_excel(file, header=header_row).fillna('')
+                df.columns = [str(c).strip() for c in df.columns]
+                m_col = df.columns[model_col_idx]
                 for _, row in df.iterrows():
-                    m_name = str(row[model_col]).strip()
-                    if not m_name or m_name.lower() in ['model', 'nan', '']: continue
-                    specs = [f"{c.title()}: {row[c]}" for c in df.columns if any(k in c for k in ['accuracy', 'range', 'axis', 'output']) if str(row[c]).strip()]
+                    m_name = str(row[m_col]).strip()
+                    if not m_name or m_name.lower() in ['model', 'nan']: continue
+                    specs = []
+                    for col in df.columns:
+                        if any(k in col.lower() for k in ['accuracy', 'range', 'axis', 'output']):
+                            val = str(row[col]).strip()
+                            if val and val.lower() != 'nan': specs.append(f"{col}: {val}")
                     all_data.append({"Model": m_name, "Specs": "\n".join(specs)})
         except: continue
     return pd.DataFrame(all_data)
@@ -32,128 +46,157 @@ def load_all_models():
 # --- 2. IMAGE SCRAPER ---
 def get_bw_sensing_image(model_name):
     base = "https://www.bw-sensing.com"
+    search_url = f"{base}/search.html?q={model_name}"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get(f"{base}/search.html?q={model_name}", timeout=5)
+        res = requests.get(search_url, timeout=7, headers=headers)
         soup = BeautifulSoup(res.text, 'html.parser')
         link = soup.select_one('.product-list a') or soup.select_one('.pro_list a')
-        if link:
-            d_res = requests.get(base + link['href'] if link['href'].startswith('/') else link['href'], timeout=5)
-            dsoup = BeautifulSoup(d_res.text, 'html.parser')
-            img = dsoup.select_one('.product-info img') or dsoup.select_one('.left-img img')
-            if img:
-                src = img.get('data-original') or img.get('src')
-                return src if src.startswith('http') else base + src
+        if not link: return None
+        detail_url = base + link['href'] if link['href'].startswith('/') else link['href']
+        d_res = requests.get(detail_url, timeout=7, headers=headers)
+        dsoup = BeautifulSoup(d_res.text, 'html.parser')
+        img_tag = dsoup.select_one('.product-info img') or dsoup.select_one('.left-img img')
+        if img_tag:
+            src = img_tag.get('data-original') or img_tag.get('src')
+            if src: return src if src.startswith('http') else base + src
     except: return None
+    return None
 
-# --- 3. UI SETUP ---
+# --- 3. THE "MERGE-PROOF" WRITER ---
+def ultra_safe_write(ws, row, col, value):
+    """Guarantees writing to a cell even if it is a read-only MergedCell."""
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        # Find which merged range this cell belongs to
+        for m_range in ws.merged_cells.ranges:
+            if cell.coordinate in m_range:
+                # Write to the top-left (Master) cell of that range
+                ws.cell(row=m_range.min_row, column=m_range.min_col).value = value
+                return
+    # If it's a standard cell, write normally
+    cell.value = value
+
+# --- 4. UI SETUP ---
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
+
+# CSS to kill the increment/decrement icons for the "Excel feel"
+st.markdown("""
+    <style>
+    input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { 
+        -webkit-appearance: none; margin: 0; 
+    }
+    input[type=number] { -moz-appearance: textfield; }
+    input::-webkit-clear-button, input::-webkit-search-cancel-button { display: none; -webkit-appearance: none; }
+    </style>
+""", unsafe_allow_html=True)
+
 model_db = load_all_models()
 
 if 'rows' not in st.session_state:
     st.session_state.rows = [{"model": ""}]
 
 with st.sidebar:
-    st.title("Quote Settings")
-    exch_rate = st.number_input("Exchange Rate (RMB/USD)", value=7.24)
+    st.title("Control Panel")
+    exch_rate = st.number_input("RMB to USD Rate", value=6.82, step=0.01)
+    st.divider()
     c_name = st.text_input("Customer Name")
-    c_contact = st.text_input("Contact Person")
+    c_contact = st.text_input("Customer Contact")
     c_addr = st.text_area("Address")
-    c_phone = st.text_input("Phone")
+    c_phone = st.text_input("Phone Number")
     c_email = st.text_input("Email")
-    country = st.text_input("Country Code", "SA")
+    country_code = st.text_input("Country Code", "SA").upper()
 
 today = datetime.date.today()
-quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country.upper()}"
+expiry = today + datetime.timedelta(days=30)
+quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country_code}"
 
 st.title(f"Quote: {quote_id}")
 
 final_data = []
 for i, _ in enumerate(st.session_state.rows):
-    with st.expander(f"Model {i+1}", expanded=True):
-        opts = [""] + sorted(model_db['Model'].unique().tolist()) if not model_db.empty else [""]
-        sel = st.selectbox("Select Model", opts, key=f"sel_{i}")
+    with st.expander(f"Product {i+1}", expanded=True):
+        opts = [""] + sorted(model_db['Model'].unique().tolist())
+        sel = st.selectbox("Search & Select Model", opts, key=f"sel_{i}")
+        
         if sel:
             m = model_db[model_db['Model'] == sel].iloc[0]
-            cols = st.columns(3)
-            r1 = cols[0].text_input("Price (1pc)", "0", key=f"p1_{i}")
-            r10 = cols[1].text_input("Price (10pcs)", "0", key=f"p10_{i}")
-            r100 = cols[2].text_input("Price (100pcs)", "0", key=f"p100_{i}")
-            final_data.append({
-                "model": sel, "specs": m['Specs'],
-                "tiers": [{"qty": 1, "rmb": float(r1 or 0)}, {"qty": 10, "rmb": float(r10 or 0)}, {"qty": 100, "rmb": float(r100 or 0)}]
-            })
+            p_cols = st.columns(3)
+            # Text inputs allow Enter/Tab without triggering browser icons
+            r1_raw = p_cols[0].text_input("RMB (1pc)", key=f"r1_{i}")
+            r10_raw = p_cols[1].text_input("RMB (10pcs)", key=f"r10_{i}")
+            r100_raw = p_cols[2].text_input("RMB (100pcs)", key=f"r100_{i}")
+            
+            def to_num(val):
+                try: return float(str(val).replace(',', '')) if val else 0.0
+                except: return 0.0
 
-if st.button("➕ Add Another Model"):
+            r1, r10, r100 = to_num(r1_raw), to_num(r10_raw), to_num(r100_raw)
+            
+            if r1 > 0 or r10 > 0 or r100 > 0:
+                final_data.append({
+                    "model": sel, "specs": m['Specs'],
+                    "tiers": [
+                        {"qty": 1, "rmb": r1},
+                        {"qty": 10, "rmb": r10},
+                        {"qty": 100, "rmb": r100}
+                    ]
+                })
+
+if st.button("➕ Add Another Product Line"):
     st.session_state.rows.append({"model": ""})
     st.rerun()
 
-# --- 4. EXPORT ENGINE ---
+# --- 5. EXPORT ---
 if st.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx') and final_data:
         wb = load_workbook('template.xlsx')
         ws = wb.active
         
-        # 1. Update Header Info
-        ws['I4'], ws['I6'] = today.strftime("%B %d, %Y"), quote_id
-        ws['B10'], ws['B11'], ws['B12'] = c_name, c_contact, c_addr
-        ws['B13'], ws['B14'] = c_phone, c_email
-
-        # Formatting Constants
-        thin = Side(style='thin')
-        border = Border(top=thin, left=thin, right=thin, bottom=thin)
-        center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-        # START POSITION
-        # Model 1 uses 17, 18, 19. 
-        # Row 20 is the empty spacer before Remarks.
+        # Metadata
+        ultra_safe_write(ws, 4, 9, today.strftime("%B %d, %Y"))
+        ultra_safe_write(ws, 5, 9, expiry.strftime("%B %d, %Y"))
+        ultra_safe_write(ws, 6, 9, quote_id)
         
-        for idx, product in enumerate(final_data):
-            if idx == 0:
-                # First model goes into the existing template rows
-                write_pos = 17
-            else:
-                # For every additional model, insert 3 rows ABOVE the footer (currently at row 20)
-                # This pushes everything from row 20 downwards
-                write_pos = 17 + (idx * 3)
-                ws.insert_rows(write_pos, 3)
-
-            # A. Apply Merges
-            ws.merge_cells(start_row=write_pos, start_column=1, end_row=write_pos+2, end_column=1)
-            ws.merge_cells(start_row=write_pos, start_column=4, end_row=write_pos+2, end_column=4)
-            ws.merge_cells(start_row=write_pos, start_column=8, end_row=write_pos+2, end_column=8)
-            ws.merge_cells(start_row=write_pos, start_column=9, end_row=write_pos+2, end_column=9)
-
-            # B. Add Values
-            ws.cell(row=write_pos, column=1).value = "Inclinometer"
-            ws.cell(row=write_pos, column=4).value = product['model']
-            ws.cell(row=write_pos, column=9).value = product['specs']
-
-            # C. Pricing & Borders
-            for sub_r in range(3):
-                row_idx = write_pos + sub_r
-                tier = product['tiers'][sub_r]
-                
-                ws.cell(row=row_idx, column=5).value = tier['qty']
-                if tier['rmb'] > 0:
-                    u_usd = round(tier['rmb'] / exch_rate, 2)
-                    ws.cell(row=row_idx, column=6).value = u_usd
-                    ws.cell(row=row_idx, column=7).value = round(u_usd * tier['qty'], 2)
-                
-                # Apply Borders and Alignment to the whole row
-                for col_idx in range(1, 10):
-                    ws.cell(row=row_idx, column=col_idx).border = border
-                    ws.cell(row=row_idx, column=col_idx).alignment = center
-
-            # D. Image
-            img_url = get_bw_sensing_image(product['model'])
+        # Customer Info
+        ultra_safe_write(ws, 10, 2, c_name)
+        ultra_safe_write(ws, 11, 2, c_contact)
+        ultra_safe_write(ws, 12, 2, c_addr)
+        ultra_safe_write(ws, 13, 2, c_phone)
+        ultra_safe_write(ws, 14, 2, c_email)
+            
+        start_row = 17
+        for idx, block in enumerate(final_data):
+            cur_top = start_row + (idx * 3)
+            
+            # 1. Model & Specs (Columns 4 & 9)
+            ultra_safe_write(ws, cur_top, 4, block['model'])
+            ultra_safe_write(ws, cur_top, 9, block['specs'])
+            ultra_safe_write(ws, cur_top, 1, "ALL") # Description column
+            
+            # Align center for the merged blocks
+            for c_idx in [1, 4, 9]:
+                ws.cell(row=cur_top, column=c_idx).alignment = Alignment(vertical='center', wrapText=True)
+            
+            # 2. Tiers (Qty Col 5, Price Col 6, Total Col 7)
+            for j, t in enumerate(block['tiers']):
+                r_idx = cur_top + j
+                ultra_safe_write(ws, r_idx, 5, t['qty'])
+                if t['rmb'] > 0:
+                    u_usd = round(t['rmb'] / exch_rate, 2)
+                    ultra_safe_write(ws, r_idx, 6, u_usd)
+                    ultra_safe_write(ws, r_idx, 7, round(u_usd * t['qty'], 2))
+            
+            # 3. Image (Col 8)
+            img_url = get_bw_sensing_image(block['model'])
             if img_url:
                 try:
                     res = requests.get(img_url, timeout=5)
                     img = XLImage(BytesIO(res.content))
-                    img.width, img.height = (80, 80)
-                    ws.add_image(img, f'H{write_pos}')
+                    img.width, img.height = (90, 90)
+                    ws.add_image(img, f'H{cur_top}')
                 except: pass
-
+            
         out = BytesIO()
         wb.save(out)
-        st.download_button("📥 Download Quote", out.getvalue(), f"{quote_id}.xlsx")
+        st.download_button("📥 Download Final Excel", out.getvalue(), f"{quote_id}.xlsx")
