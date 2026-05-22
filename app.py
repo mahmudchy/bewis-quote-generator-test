@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.cell.cell import MergedCell, Cell
 from openpyxl.styles import Alignment, Border, Side
-
+st.write("If you can read this, the app is running.")
 # --- 1. DATA LOADING ---
 @st.cache_data
 def load_all_models():
