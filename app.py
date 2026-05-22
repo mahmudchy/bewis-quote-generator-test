@@ -7,9 +7,9 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.cell.cell import MergedCell, Cell
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Side
-st.write("If you can read this, the app is running.")
+
 # --- 1. DATA LOADING ---
 @st.cache_data
 def load_all_models():
@@ -43,7 +43,6 @@ def load_all_models():
         except: continue
     return pd.DataFrame(all_data)
 
-# --- 2. IMAGE SCRAPER ---
 def get_bw_sensing_image(model_name):
     base = "https://www.bw-sensing.com"
     search_url = f"{base}/search.html?q={model_name}"
@@ -63,7 +62,6 @@ def get_bw_sensing_image(model_name):
     except: return None
     return None
 
-# --- 3. THE "MERGE-PROOF" WRITER ---
 def ultra_safe_write(ws, row, col, value):
     cell = ws.cell(row=row, column=col)
     if isinstance(cell, MergedCell):
@@ -73,45 +71,78 @@ def ultra_safe_write(ws, row, col, value):
                 return
     cell.value = value
 
-# --- 4. UI SETUP ---
+# --- UI SETUP ---
 st.set_page_config(layout="wide", page_title="BWS Quote Gen")
-
 st.markdown("""<style>input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }</style>""", unsafe_allow_html=True)
 
 model_db = load_all_models()
 if 'rows' not in st.session_state: st.session_state.rows = [{"model": ""}]
 
-# ... (Sidebar and Input Logic remain the same) ...
+with st.sidebar:
+    st.title("Control Panel")
+    exch_rate = st.number_input("RMB to USD Rate", value=6.82, step=0.01)
+    c_name = st.text_input("Customer Name")
+    country_code = st.text_input("Country Code", "SA").upper()
 
-# --- 5. EXPORT ---
+today = datetime.date.today()
+expiry = today + datetime.timedelta(days=30)
+quote_id = f"BW-{today.strftime('%Y%m%d')}-MC-{country_code}"
+st.title(f"Quote: {quote_id}")
+
+# --- INPUT LOGIC ---
+final_data = []
+for i, _ in enumerate(st.session_state.rows):
+    with st.expander(f"Product {i+1}", expanded=True):
+        opts = [""] + sorted(model_db['Model'].unique().tolist())
+        sel = st.selectbox("Search & Select Model", opts, key=f"sel_{i}")
+        if sel:
+            m = model_db[model_db['Model'] == sel].iloc[0]
+            cols = st.columns(3)
+            r1 = float(cols[0].text_input("RMB (1pc)", key=f"r1_{i}") or 0)
+            r10 = float(cols[1].text_input("RMB (10pcs)", key=f"r10_{i}") or 0)
+            r100 = float(cols[2].text_input("RMB (100pcs)", key=f"r100_{i}") or 0)
+            if r1 > 0 or r10 > 0 or r100 > 0:
+                final_data.append({"model": sel, "specs": m['Specs'], "tiers": [{"qty": 1, "rmb": r1}, {"qty": 10, "rmb": r10}, {"qty": 100, "rmb": r100}]})
+
+if st.button("➕ Add Another Product Line"):
+    st.session_state.rows.append({"model": ""})
+    st.rerun()
+
+# --- EXPORT ---
 if st.button("🚀 Export to Excel"):
     if os.path.exists('template.xlsx') and final_data:
         wb = load_workbook('template.xlsx')
         ws = wb.active
+        ref_border = ws.cell(row=17, column=1).border
         
-        # Capture reference border from the first row of the template (e.g., cell A17)
-        ref_cell = ws.cell(row=17, column=1)
-        ref_border = ref_cell.border
-        
-        start_row = 17
         for idx, block in enumerate(final_data):
-            cur_top = start_row + (idx * 3)
-            
-            # Write data
+            cur_top = 17 + (idx * 3)
             ultra_safe_write(ws, cur_top, 4, block['model'])
             ultra_safe_write(ws, cur_top, 9, block['specs'])
             ultra_safe_write(ws, cur_top, 1, "ALL")
             
-            # Apply reference borders to the 3-row block
             for r in range(cur_top, cur_top + 3):
-                for c in range(1, 10): # Assuming 9 columns
+                for c in range(1, 10):
                     cell = ws.cell(row=r, column=c)
                     cell.border = ref_border
                     cell.alignment = Alignment(vertical='center', horizontal='center', wrapText=True)
-
-            # Tiers & Image logic...
-            # (Keep your existing Tiers loop and Image logic here)
             
+            for j, t in enumerate(block['tiers']):
+                r_idx = cur_top + j
+                ultra_safe_write(ws, r_idx, 5, t['qty'])
+                if t['rmb'] > 0:
+                    u_usd = round(t['rmb'] / exch_rate, 2)
+                    ultra_safe_write(ws, r_idx, 6, u_usd)
+                    ultra_safe_write(ws, r_idx, 7, round(u_usd * t['qty'], 2))
+            
+            img_url = get_bw_sensing_image(block['model'])
+            if img_url:
+                try:
+                    img = XLImage(BytesIO(requests.get(img_url, timeout=5).content))
+                    img.width, img.height = (90, 90)
+                    ws.add_image(img, f'H{cur_top}')
+                except: pass
+                    
         out = BytesIO()
         wb.save(out)
         st.download_button("📥 Download Final Excel", out.getvalue(), f"{quote_id}.xlsx")
